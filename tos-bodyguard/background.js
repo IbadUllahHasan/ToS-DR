@@ -287,10 +287,11 @@ async function runPromptInMainWorld(tabId, prompt, schema) {
           }
 
           let session;
+          const outputs = { expectedOutputs: [{ type: 'text', languages: ['en'] }] };
           try {
-            session = await api.create({ temperature: 0.1, topK: 3 });
+            session = await api.create({ temperature: 0.1, topK: 3, ...outputs });
           } catch {
-            session = await api.create(); // some builds reject sampling options
+            session = await api.create(outputs); // some builds reject sampling options
           }
           try {
             // Structured output on the new API: valid JSON + generation stops

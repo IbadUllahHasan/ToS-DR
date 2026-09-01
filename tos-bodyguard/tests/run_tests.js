@@ -57,8 +57,15 @@ function loadContentScript(overrides = {}) {
     },
     storage: {
       local: {
-        get: async (key) => (key in storage ? { [key]: storage[key] } : {}),
-        set: async (obj) => { setCalls.push(obj); return Object.assign(storage, obj); },
+        get: async (key) => {
+          if (overrides.storageThrows) throw new Error('Extension context invalidated');
+          return key in storage ? { [key]: storage[key] } : {};
+        },
+        set: async (obj) => {
+          if (overrides.storageThrows) throw new Error('Extension context invalidated');
+          setCalls.push(obj);
+          return Object.assign(storage, obj);
+        },
       },
     },
   };
@@ -95,7 +102,7 @@ function loadContentScript(overrides = {}) {
     fetch: overrides.fetch || (async () => { throw new Error('network disabled in test'); }),
     MutationObserver: MutationObserverMock,
     DOMParser: DOMParserMock,
-    console: { log: () => {}, warn: () => {}, info: () => {}, error: (...a) => consoleErrors.push(a) },
+    console: { log: () => {}, warn: () => {}, info: () => {}, debug: () => {}, error: (...a) => consoleErrors.push(a) },
     setTimeout, clearTimeout, AbortController,
   };
   vm.createContext(sandbox);
@@ -296,13 +303,14 @@ async function testCreateOptionsRejectedRetriesDefaults() {
 
 
 async function testAbortSkipsBridgeAndFailsFast() {
-  // Regression: a local timeout must NOT fall through to the bridge
-  // (that used to start the whole inference over -> perceived "forever").
+  // A timeout retries ONCE with a halved input, then fails fast — it must
+  // NOT fall through to the bridge (that used to restart the inference).
+  const promptLens = [];
   const ai = {
     languageModel: {
       capabilities: async () => ({ available: 'readily' }),
       create: async () => ({
-        prompt: async () => { throw new DOMException('The operation was aborted.', 'AbortError'); },
+        prompt: async (p) => { promptLens.push(p.length); throw new DOMException('The operation was aborted.', 'AbortError'); },
         destroy: () => {},
       }),
     },
@@ -310,14 +318,51 @@ async function testAbortSkipsBridgeAndFailsFast() {
   const sentTypes = [];
   const { sendManualScan } = loadContentScript({
     ai,
-    bodyText: 'policy text',
+    bodyText: 'x'.repeat(9000),
     onSendMessage: (msg) => { sentTypes.push(msg.type); return { ok: true }; },
   });
   const resp = await sendManualScan();
   assert.strictEqual(resp.status, 'error');
   assert.ok(resp.error.includes('timed out'), 'should report a timeout');
+  assert.strictEqual(promptLens.length, 2, 'exactly one shrink retry');
+  assert.ok(promptLens[1] < promptLens[0], 'retry uses a smaller input');
   assert.ok(!sentTypes.includes('RUN_AI_MAINWORLD'), 'bridge must not re-run after abort');
-  console.log('PASS abort/timeout fails fast without bridge re-run');
+  console.log('PASS abort/timeout shrinks input once, then fails fast without bridge re-run');
+}
+
+async function testQuotaExceededShrinksInputAndSucceeds() {
+  const promptLens = [];
+  let calls = 0;
+  const ai = {
+    languageModel: {
+      capabilities: async () => ({ available: 'readily' }),
+      create: async () => ({
+        prompt: async (p) => {
+          promptLens.push(p.length);
+          calls++;
+          if (calls === 1) throw new DOMException('Input too large for context window', 'QuotaExceededError');
+          return '{"total_risks_found":0,"risks":[]}';
+        },
+        destroy: () => {},
+      }),
+    },
+  };
+  const { sendManualScan } = loadContentScript({ ai, bodyText: 'y'.repeat(9000) });
+  const resp = await sendManualScan();
+  assert.strictEqual(resp.status, 'complete');
+  assert.strictEqual(promptLens.length, 2, 'one shrink retry');
+  assert.ok(promptLens[1] < promptLens[0], 'retry uses a smaller input');
+  console.log('PASS QuotaExceededError shrinks input once then succeeds');
+}
+
+async function testContextInvalidatedIsQuiet() {
+  // Simulates an old content script after an extension reload: every
+  // chrome.storage call throws. Must log quietly and store nothing.
+  const { consoleErrors, storage } = loadContentScript({ storageThrows: true });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(Object.keys(storage), [], 'nothing should be stored');
+  assert.deepEqual(consoleErrors, [], 'nothing should hit console.error');
+  console.log('PASS extension-context-invalidation handled quietly');
 }
 
 async function testLanguageModelNamespaceUsesResponseConstraint() {
@@ -528,6 +573,7 @@ async function testFetchRelayStripsHtml() {
 }
 
 async function testMainWorldBridge() {
+  let createOpts = null;
   const env = {};
   const executeScript = async (opts) => {
     assert.strictEqual(opts.world, 'MAIN');
@@ -538,7 +584,10 @@ async function testMainWorldBridge() {
       ai: {
         languageModel: {
           capabilities: async () => ({ available: 'readily' }),
-          create: async () => ({ prompt: async (p) => 'AI:' + p.slice(0, 3), destroy: () => {} }),
+          create: async (opts) => {
+            createOpts = opts;
+            return { prompt: async (p) => 'AI:' + p.slice(0, 3), destroy: () => {} };
+          },
         },
       },
     };
@@ -553,7 +602,8 @@ async function testMainWorldBridge() {
     listeners.message[0]({ type: 'RUN_AI_MAINWORLD', prompt: 'You are a strict...', schema: { type: 'object', marker: true } }, { tab: { id: 2 } }, resolve)
   );
   assert.deepEqual(resp, { ok: true, text: 'AI:You' });
-  console.log('PASS MAIN-world bridge executes prompt and returns model text');
+  assert.ok(createOpts?.expectedOutputs?.[0]?.languages?.includes('en'), 'bridge create must pass expectedOutputs');
+  console.log('PASS MAIN-world bridge executes prompt and returns model text (+expectedOutputs)');
 }
 
 async function testMainWorldBridgeNoAi() {
@@ -644,6 +694,8 @@ async function testQueueStatePublished() {
     testDomExceptionIsDescribedNotObjectified,
     testCreateOptionsRejectedRetriesDefaults,
     testAbortSkipsBridgeAndFailsFast,
+    testQuotaExceededShrinksInputAndSucceeds,
+    testContextInvalidatedIsQuiet,
     testLanguageModelNamespaceUsesResponseConstraint,
     testAnalysisHoldsAndReleasesMutex,
     testNegativeResultBacksOff,

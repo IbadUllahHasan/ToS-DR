@@ -25,6 +25,7 @@
 
   const HOSTNAME = location.hostname;
   const MAX_TEXT_CHARS = 8000;        // stay well inside Gemini Nano's context window
+  const MAX_TEXT_CHARS_FALLBACK = 4000; // halved retry for slow/CPU-bound machines
   const MAX_LINKS_TO_FETCH = 3;       // e.g. Privacy + Terms + Cookies
   const CACHE_TTL_MS = 30 * 60 * 1000; // don't re-analyze a successfully-scanned host for 30 min
   const NEGATIVE_TTL_MS = 10 * 60 * 1000; // back off failures for 10 min (no retry storms)
@@ -99,6 +100,10 @@ TEXT TO ANALYZE:
    * duck-type on .name/.message. Turns "[object DOMException]" into e.g.
    * "NotAllowedError: Session creation requires user activation."
    */
+  function isContextInvalidated(err) {
+    return String(err?.message || err).includes('Extension context invalidated');
+  }
+
   function describeError(err) {
     if (!err) return 'Unknown error';
     const name = typeof err.name === 'string' ? err.name : '';
@@ -124,9 +129,12 @@ TEXT TO ANALYZE:
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg?.type === 'MANUAL_SCAN') {
+      const reply = (payload) => {
+        try { sendResponse(payload); } catch { /* popup/channel already gone */ }
+      };
       runManualScan()
-        .then(sendResponse)
-        .catch((err) => sendResponse({ status: 'error', error: describeError(err) }));
+        .then(reply)
+        .catch((err) => reply({ status: 'error', error: describeError(err) }));
       return true; // async response
     }
     return false;
@@ -224,7 +232,8 @@ TEXT TO ANALYZE:
           }
           return 'readily';
         },
-        create: (opts) => legacy.create(opts),
+        create: (opts) =>
+          legacy.create({ expectedOutputs: [{ type: 'text', languages: ['en'] }], ...opts }),
         promptOptions: {}, // legacy API predates responseConstraint
       };
     }
@@ -248,7 +257,8 @@ TEXT TO ANALYZE:
           const caps = await ext.capabilities();
           return caps.available;
         },
-        create: (opts) => ext.create(opts),
+        create: (opts) =>
+          ext.create({ expectedOutputs: [{ type: 'text', languages: ['en'] }], ...opts }),
         promptOptions: {},
       };
     }
@@ -258,9 +268,6 @@ TEXT TO ANALYZE:
 
 
   async function analyzeText(rawText, scanId) {
-    const text = rawText.slice(0, MAX_TEXT_CHARS);
-    const prompt = AI_PROMPT_TEMPLATE.replace('[INSERT_SCRAPED_TEXT]', text);
-
     // Serialize on-device inference browser-wide via the service worker.
     // Gemini Nano executes ONE session at a time: concurrent scans from
     // multiple tabs get their sessions destroyed (InvalidStateError) or are
@@ -275,7 +282,7 @@ TEXT TO ANALYZE:
 
     try {
       // Token count → progress: 45% baseline + up to 50 more as output streams in.
-      return await runAnalysis(prompt, (chars) =>
+      return await runAnalysis(rawText, scanId, (chars) =>
         reportProgress('Analyzing with on-device AI…', 45 + Math.min(50, (chars / 800) * 50), false, scanId)
       );
     } finally {
@@ -285,71 +292,93 @@ TEXT TO ANALYZE:
     }
   }
 
-  async function runAnalysis(prompt, onChars) {
+  async function runAnalysis(rawText, scanId, onChars) {
     const api = getLocalAI();
     let localError = null;
+    let maxChars = MAX_TEXT_CHARS;
+    let shrunk = false;          // halve input once on timeout/quota errors
+    let retriedDestroyed = false; // recreate session once on eviction
 
     if (api) {
-      // attempt 0 + one retry: Chrome destroys sessions of backgrounded tabs
-      // under memory pressure (InvalidStateError) — a fresh session recovers.
-      for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const availability = await api.checkAvailability().catch(() => 'readily');
-        if (availability === 'no' || availability === 'unavailable') {
-          return { status: 'ai_unavailable' };
-        }
-
-        // Some builds reject sampling options — retry with defaults.
-        let session;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        let prompt = AI_PROMPT_TEMPLATE.replace('[INSERT_SCRAPED_TEXT]', rawText.slice(0, maxChars));
         try {
-          session = await api.create({ temperature: 0.1, topK: 3 });
-        } catch (optErr) {
-          console.warn('[TOS Bodyguard] AI create(options) failed, retrying defaults:', describeError(optErr));
-          session = await api.create();
-        }
+          const availability = await api.checkAvailability().catch(() => 'readily');
+          if (availability === 'no' || availability === 'unavailable') {
+            return { status: 'ai_unavailable' };
+          }
 
-        try {
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
-          const promptOpts = { signal: controller.signal, ...(api.promptOptions || {}) };
-          const output =
-            typeof session.promptStreaming === 'function'
-              ? await promptWithStreaming(session, prompt, promptOpts, onChars)
-              : await session.prompt(prompt, promptOpts);
-          clearTimeout(timer);
-          return { status: 'complete', result: parseAIResponse(output) };
-        } finally {
-          try { session.destroy?.(); } catch { /* noop */ }
+          // Some builds reject sampling options — retry with defaults.
+          let session;
+          try {
+            session = await api.create({ temperature: 0.1, topK: 3 });
+          } catch (optErr) {
+            console.warn('[TOS Bodyguard] AI create(options) failed, retrying defaults:', describeError(optErr));
+            session = await api.create({ expectedOutputs: [{ type: 'text', languages: ['en'] }] });
+          }
+
+          try {
+            // Fit the prompt to the model's real context window when the API
+            // exposes usage measurement (prevents QuotaExceededError outright).
+            if (typeof session.measureInputUsage === 'function' && Number.isFinite(session.inputQuota)) {
+              try {
+                const usage = await session.measureInputUsage(prompt);
+                if (usage > session.inputQuota && session.inputQuota > 0) {
+                  const base = rawText.slice(0, maxChars);
+                  const fitChars = Math.max(500, Math.floor(base.length * (session.inputQuota / usage) * 0.9));
+                  prompt = AI_PROMPT_TEMPLATE.replace('[INSERT_SCRAPED_TEXT]', base.slice(0, fitChars));
+                  console.warn(`[TOS Bodyguard] Prompt exceeded input quota — fitted to ${fitChars} chars.`);
+                }
+              } catch { /* measurement is best-effort */ }
+            }
+
+            const controller = new AbortController();
+            const timeoutMs = shrunk ? 90000 : AI_TIMEOUT_MS; // halved input should be ~2x faster
+            const timer = setTimeout(() => controller.abort(), timeoutMs);
+            const promptOpts = { signal: controller.signal, ...(api.promptOptions || {}) };
+            const output =
+              typeof session.promptStreaming === 'function'
+                ? await promptWithStreaming(session, prompt, promptOpts, onChars)
+                : await session.prompt(prompt, promptOpts);
+            clearTimeout(timer);
+            return { status: 'complete', result: parseAIResponse(output) };
+          } finally {
+            try { session.destroy?.(); } catch { /* noop */ }
+          }
+        } catch (err) {
+          localError = err;
+          console.warn('[TOS Bodyguard] Local AI session failed:', describeError(err));
+          const name = err && err.name;
+
+          // Too much text for this machine right now → halve once and retry.
+          if ((name === 'QuotaExceededError' || name === 'AbortError') && !shrunk) {
+            shrunk = true;
+            maxChars = MAX_TEXT_CHARS_FALLBACK;
+            console.warn(`[TOS Bodyguard] ${name} — retrying with a smaller (${maxChars}-char) input.`);
+            continue;
+          }
+          if (name === 'AbortError') {
+            return {
+              status: 'error',
+              error: 'AI timed out even with a reduced input — the on-device model is CPU-bound or busy. Try again.',
+            };
+          }
+          if (name === 'InvalidStateError' && !retriedDestroyed) {
+            retriedDestroyed = true;
+            console.warn('[TOS Bodyguard] Session destroyed underneath us — retrying once with a fresh session.');
+            continue;
+          }
+          break;
         }
-      } catch (err) {
-        // Typically a DOMException from create()/prompt(): NotAllowedError
-        // (user activation required while the model downloads),
-        // NotSupportedError, QuotaExceededError, AbortError... Log it
-        // usefully, then give the MAIN-world bridge a second chance.
-        localError = err;
-        console.warn('[TOS Bodyguard] Local AI session failed:', describeError(err));
-        if (err && err.name === 'AbortError') {
-          // Our own timeout fired. Re-running the same inference via the
-          // bridge would just double the wait — fail fast instead.
-          return {
-            status: 'error',
-            error: `AI timed out after ${Math.round(AI_TIMEOUT_MS / 1000)}s — the on-device model is CPU-bound or busy. Try again.`,
-          };
-        }
-        if (err && err.name === 'InvalidStateError' && attempt === 0) {
-          console.warn('[TOS Bodyguard] Session destroyed underneath us — retrying once with a fresh session.');
-          continue;
-        }
-        break;
-      }
       }
     }
 
     // Fallback: on some Chrome builds the Prompt API only exists in the page's
     // MAIN world, which content scripts (isolated world) cannot see. The
     // service worker can execute our prompt there via chrome.scripting.
+    const bridgePrompt = AI_PROMPT_TEMPLATE.replace('[INSERT_SCRAPED_TEXT]', rawText.slice(0, maxChars));
     const bridged = await chrome.runtime
-      .sendMessage({ type: 'RUN_AI_MAINWORLD', prompt, schema: RISK_SCHEMA })
+      .sendMessage({ type: 'RUN_AI_MAINWORLD', prompt: bridgePrompt, schema: RISK_SCHEMA })
       .catch(() => null);
 
     if (bridged?.ok) return { status: 'complete', result: parseAIResponse(bridged.text) };
@@ -562,6 +591,12 @@ TEXT TO ANALYZE:
           : analysis
       );
     } catch (err) {
+      if (isContextInvalidated(err)) {
+        // Extension was reloaded/updated mid-scan; this old script is dead.
+        // Log quietly — nothing can be stored or reported from here anyway.
+        console.debug('[TOS Bodyguard] Extension reloaded; old content script stopping.');
+        return;
+      }
       console.error('[TOS Bodyguard] Auto-scan failed:', describeError(err), err);
       await autoSave({ status: 'error', error: describeError(err) }).catch(() => {});
     }
