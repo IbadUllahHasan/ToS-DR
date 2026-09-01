@@ -281,6 +281,11 @@ const CLOUD_PROVIDERS = {
   glm:     { name: 'GLM (Zhipu)',   defaultModel: 'glm-4.6' },
 };
 
+// Models providers have retired/renamed -> current replacement.
+const DEPRECATED_MODELS = {
+  'groq:llama-3.3-70b-versatile': 'openai/gpt-oss-120b',
+};
+
 const CLOUD_MAX_TEXT = 100000;     // ~25k tokens — plenty for full policies
 const CLOUD_CHUNK_SIZE = 12000;    // chars per analysis chunk
 const CLOUD_CHUNK_OVERLAP = 400;   // catch clauses split across a boundary
@@ -434,7 +439,9 @@ async function runCloudAnalysis({ text, hostname, scanId }) {
     if (!cfg) return { ok: false, error: 'unknown-provider' };
     const apiKey = settings.keys?.[provider];
     if (!apiKey) return { ok: false, error: 'no-api-key' };
-    const model = settings.models?.[provider] || cfg.defaultModel;
+    let model = settings.models?.[provider] || cfg.defaultModel;
+    const migrated = DEPRECATED_MODELS[`${provider}:${model}`];
+    if (migrated) model = migrated; // saved before a provider retired the name
 
     const chunks = chunkText(String(text || '').slice(0, CLOUD_MAX_TEXT));
     const results = new Array(chunks.length);

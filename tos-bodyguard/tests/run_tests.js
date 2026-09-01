@@ -817,6 +817,40 @@ async function testCloudResponseCarriesEngine() {
   console.log('PASS cloud response identifies the engine used');
 }
 
+
+async function testSmartExtractionFindsLateClauses() {
+  // Hostile clause sits beyond the 8,000-char mark — relevance packing must
+  // still get it into the prompt (old behavior: hard-truncated away).
+  const benign = 'This service is wonderful and we care deeply about you. '.repeat(400); // ~24k chars
+  const hostile = 'We sell your personal data to data brokers for advertising purposes.';
+  const captured = {};
+  const ai = aiReturning('{"total_risks_found":1,"risks":[]}', captured);
+  const { sendManualScan } = loadContentScript({ ai, bodyText: benign + hostile });
+  const resp = await sendManualScan();
+  assert.strictEqual(resp.status, 'complete');
+  assert.ok(captured.prompt.includes('data brokers'), 'late hostile sentence must be packed into the prompt');
+  assert.ok(!captured.prompt.includes('wonderful and we care deeply about you. This service is wonderful'), 'boilerplate should be mostly dropped');
+  console.log('PASS relevance packing surfaces clauses beyond the 8k mark');
+}
+
+async function testDeprecatedModelMigrated() {
+  const bodies = [];
+  const fetchMock = async (url, opts) => {
+    bodies.push(JSON.parse(opts.body));
+    return { ok: true, json: async () => ({ choices: [{ message: { content: '{"total_risks_found":0,"risks":[]}' } }] }) };
+  };
+  const { listeners } = loadBackground({
+    fetch: fetchMock,
+    localData: { settings: { provider: 'groq', keys: { groq: 'k' }, models: { groq: 'llama-3.3-70b-versatile' } } },
+  });
+  const resp = await new Promise((resolve) =>
+    listeners.message[0]({ type: 'RUN_AI_CLOUD', text: 'short', hostname: 'h', scanId: 's' }, { tab: { id: 1 } }, resolve)
+  );
+  assert.ok(resp.ok);
+  assert.strictEqual(bodies[0].model, 'openai/gpt-oss-120b', 'dead model name auto-migrated');
+  console.log('PASS deprecated saved model names auto-migrate to current defaults');
+}
+
 /* ------------------------------------------------------------------ *
  * Runner
  * ------------------------------------------------------------------ */
@@ -856,6 +890,8 @@ async function testCloudResponseCarriesEngine() {
     testCloudTestEndpoint,
     testPingReportsVersionAndFeatures,
     testCloudResponseCarriesEngine,
+    testSmartExtractionFindsLateClauses,
+    testDeprecatedModelMigrated,
   ];
   let failed = 0;
   for (const t of tests) {

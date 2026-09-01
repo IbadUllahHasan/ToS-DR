@@ -25,6 +25,10 @@ const PROVIDER_DEFAULT_MODELS = {
   glm: 'glm-4.6',
 };
 
+const DEPRECATED_MODELS = {
+  'groq:llama-3.3-70b-versatile': 'openai/gpt-oss-120b',
+};
+
 const PROVIDER_NAMES = {
   gemini: 'Google Gemini',
   groq: 'Groq',
@@ -162,6 +166,18 @@ async function initSettings() {
 
   const stored = await chrome.storage.local.get('settings').catch(() => ({}));
   state.settings = { provider: 'nano', keys: {}, models: {}, ...(stored.settings || {}) };
+
+  // Auto-heal saved model names that providers have since retired.
+  let migrated = false;
+  for (const [key, replacement] of Object.entries(DEPRECATED_MODELS)) {
+    const [prov, oldModel] = key.split(':');
+    if (state.settings.models?.[prov] === oldModel) {
+      state.settings.models[prov] = replacement;
+      migrated = true;
+    }
+  }
+  if (migrated) await chrome.storage.local.set({ settings: state.settings });
+
   providerSel.value = state.settings.provider;
   syncProviderFields();
   updateEngineNote();

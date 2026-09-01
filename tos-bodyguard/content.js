@@ -100,6 +100,51 @@ TEXT TO ANALYZE:
    * duck-type on .name/.message. Turns "[object DOMException]" into e.g.
    * "NotAllowedError: Session creation requires user activation."
    */
+  /**
+   * Relevance packing for the on-device path. Nano's context window is tiny,
+   * so instead of the FIRST N chars (mostly intro boilerplate), we pack the
+   * N chars with the highest hostile-clause signal density — preserving
+   * document order so the text still reads coherently.
+   */
+  const RISK_SIGNALS = [
+    [/(sell|sale|selling|sold)/i, 3],
+    [/third[- ]part(y|ies)/i, 2],
+    [/advertis/i, 2],
+    [/retain|retention|indefinitely/i, 3],
+    [/waive|arbitration|class[- ]action|jury/i, 3],
+    [/track|pixel|fingerprint/i, 2],
+    [/profil(e|ing)|infer/i, 2],
+    [/broker/i, 3],
+    [/biometric|precise location/i, 3],
+    [/share|sharing|disclose|transfer/i, 2],
+    [/partner/i, 1],
+    [/collect|combine|aggregat/i, 1],
+    [/delete|deletion/i, 1],
+  ];
+
+  function selectTextForLocal(rawText, maxChars) {
+    if (rawText.length <= maxChars) return rawText;
+    const sentences = rawText.split(/(?<=\.)\s+/);
+    const scored = sentences.map((s, i) => {
+      let score = 0;
+      for (const [re, w] of RISK_SIGNALS) if (re.test(s)) score += w;
+      return { s, i, score };
+    });
+    const hits = scored.filter((x) => x.score > 0).sort((a, b) => b.score - a.score);
+    if (hits.length === 0) return rawText.slice(0, maxChars); // no signals — first N chars
+
+    const picked = [];
+    let budget = maxChars;
+    for (const h of hits) {
+      if (h.s.length > budget) continue;
+      picked.push(h);
+      budget -= h.s.length + 1;
+      if (budget <= 0) break;
+    }
+    picked.sort((a, b) => a.i - b.i); // restore document order
+    return picked.map((x) => x.s).join(' ');
+  }
+
   function isContextInvalidated(err) {
     return String(err?.message || err).includes('Extension context invalidated');
   }
@@ -323,7 +368,7 @@ TEXT TO ANALYZE:
 
     if (api) {
       for (let attempt = 0; attempt < 3; attempt++) {
-        let prompt = AI_PROMPT_TEMPLATE.replace('[INSERT_SCRAPED_TEXT]', rawText.slice(0, maxChars));
+        let prompt = AI_PROMPT_TEMPLATE.replace('[INSERT_SCRAPED_TEXT]', selectTextForLocal(rawText, maxChars));
         try {
           const availability = await api.checkAvailability().catch(() => 'readily');
           if (availability === 'no' || availability === 'unavailable') {
@@ -346,7 +391,7 @@ TEXT TO ANALYZE:
               try {
                 const usage = await session.measureInputUsage(prompt);
                 if (usage > session.inputQuota && session.inputQuota > 0) {
-                  const base = rawText.slice(0, maxChars);
+                  const base = selectTextForLocal(rawText, maxChars);
                   const fitChars = Math.max(500, Math.floor(base.length * (session.inputQuota / usage) * 0.9));
                   prompt = AI_PROMPT_TEMPLATE.replace('[INSERT_SCRAPED_TEXT]', base.slice(0, fitChars));
                   console.warn(`[TOS Bodyguard] Prompt exceeded input quota — fitted to ${fitChars} chars.`);
@@ -398,7 +443,7 @@ TEXT TO ANALYZE:
     // Fallback: on some Chrome builds the Prompt API only exists in the page's
     // MAIN world, which content scripts (isolated world) cannot see. The
     // service worker can execute our prompt there via chrome.scripting.
-    const bridgePrompt = AI_PROMPT_TEMPLATE.replace('[INSERT_SCRAPED_TEXT]', rawText.slice(0, maxChars));
+    const bridgePrompt = AI_PROMPT_TEMPLATE.replace('[INSERT_SCRAPED_TEXT]', selectTextForLocal(rawText, maxChars));
     const bridged = await chrome.runtime
       .sendMessage({ type: 'RUN_AI_MAINWORLD', prompt: bridgePrompt, schema: RISK_SCHEMA })
       .catch(() => null);
