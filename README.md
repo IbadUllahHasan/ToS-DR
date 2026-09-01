@@ -48,6 +48,26 @@ No accounts. No servers of ours. No telemetry. Ever.
 - Cloud keys are stored in per-extension sandboxed storage, read **only** by the service worker, and sent **only** to your chosen provider over HTTPS. Never logged, never in page DOM, never shared.
 - Tip: use a spend-capped API key for extra peace of mind.
 
+## ❓ FAQ
+
+**Can the AI providers read my data or see what I do on websites?**
+No. The only thing ever sent is the *policy document text* — a public page. Never your
+cookies, accounts, history, form data, or even the URL. The API is stateless: it reads
+the text, returns JSON, done. (One caveat: in cloud mode, don't use "Scan Current Page"
+on pages with private content like open inboxes — it sends the visible page text.
+Auto-scan only ever touches public policy pages. On-device Nano mode sends nothing, ever.)
+
+**Is my API key safe?**
+Stored in per-extension sandboxed storage (invisible to websites and other extensions),
+read only by the service worker, sent only to your provider over HTTPS. Never logged,
+never in page DOM. Residual risk is local device access — use a spend-capped key.
+
+**Do the providers train on the policy text?**
+OpenAI / Groq / MiniMax API tiers: no. Gemini API: paid tier no, free AI Studio tier may.
+
+**Does the extension phone home?**
+There is no home. No analytics, no telemetry, no accounts — read the code.
+
 ## 📂 Technical docs
 
 Architecture, prompt design, test suite, and dev setup live in [`tos-bodyguard/README.md`](tos-bodyguard/README.md).
