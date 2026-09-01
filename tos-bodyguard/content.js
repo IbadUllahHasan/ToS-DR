@@ -26,7 +26,8 @@
   const HOSTNAME = location.hostname;
   const MAX_TEXT_CHARS = 8000;        // stay well inside Gemini Nano's context window
   const MAX_LINKS_TO_FETCH = 3;       // e.g. Privacy + Terms + Cookies
-  const CACHE_TTL_MS = 30 * 60 * 1000; // don't re-analyze the same host for 30 min
+  const CACHE_TTL_MS = 30 * 60 * 1000; // don't re-analyze a successfully-scanned host for 30 min
+  const NEGATIVE_TTL_MS = 10 * 60 * 1000; // back off failures for 10 min (no retry storms)
   const AI_TIMEOUT_MS = 180 * 1000; // CPU-fallback inference on 8k chars can take minutes
 
   /**
@@ -256,10 +257,31 @@ TEXT TO ANALYZE:
     const text = rawText.slice(0, MAX_TEXT_CHARS);
     const prompt = AI_PROMPT_TEMPLATE.replace('[INSERT_SCRAPED_TEXT]', text);
 
+    // Serialize on-device inference browser-wide via the service worker.
+    // Gemini Nano executes ONE session at a time: concurrent scans from
+    // multiple tabs get their sessions destroyed (InvalidStateError) or are
+    // serialized opaquely by Chrome — which looks like "forever" to users.
+    const lock = await chrome.runtime
+      .sendMessage({ type: 'AI_ACQUIRE' })
+      .catch(() => null); // fail-open if the service worker is unreachable
+
+    try {
+      return await runAnalysis(prompt);
+    } finally {
+      if (lock?.granted) {
+        chrome.runtime.sendMessage({ type: 'AI_RELEASE' }).catch(() => {});
+      }
+    }
+  }
+
+  async function runAnalysis(prompt) {
     const api = getLocalAI();
     let localError = null;
 
     if (api) {
+      // attempt 0 + one retry: Chrome destroys sessions of backgrounded tabs
+      // under memory pressure (InvalidStateError) — a fresh session recovers.
+      for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const availability = await api.checkAvailability().catch(() => 'readily');
         if (availability === 'no' || availability === 'unavailable') {
@@ -299,6 +321,12 @@ TEXT TO ANALYZE:
             error: `AI timed out after ${Math.round(AI_TIMEOUT_MS / 1000)}s — the on-device model is CPU-bound or busy. Try again.`,
           };
         }
+        if (err && err.name === 'InvalidStateError' && attempt === 0) {
+          console.warn('[TOS Bodyguard] Session destroyed underneath us — retrying once with a fresh session.');
+          continue;
+        }
+        break;
+      }
       }
     }
 
@@ -389,14 +417,20 @@ TEXT TO ANALYZE:
 
   async function runAutoScan() {
     try {
-      // Skip fresh analysis if we have a recent result for this host.
+      // Skip fresh analysis if we have a recent result for this host —
+      // including failures. Without negative caching, every pageview retries
+      // the (expensive, serialized) on-device inference and creates a storm.
       const cached = (await chrome.storage.local.get(HOSTNAME))[HOSTNAME];
-      if (cached?.status === 'complete' && Date.now() - cached.updatedAt < CACHE_TTL_MS) {
+      const ttl =
+        cached?.status === 'complete' ? CACHE_TTL_MS
+        : cached?.status === 'loading' ? 0 // a previous page's in-flight scan died with the page
+        : NEGATIVE_TTL_MS;
+      if (cached && Date.now() - cached.updatedAt < ttl) {
         chrome.runtime
           .sendMessage({
             type: 'ANALYSIS_COMPLETE',
             hostname: HOSTNAME,
-            status: 'complete',
+            status: cached.status,
             total_risks_found: cached.result?.total_risks_found ?? 0,
           })
           .catch(() => {});

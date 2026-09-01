@@ -38,8 +38,85 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       runPromptInMainWorld(sender.tab?.id, msg.prompt, msg.schema).then(sendResponse);
       return true; // async
 
+    case 'AI_ACQUIRE':
+      return acquireAiLock(sender, sendResponse);
+
+    case 'AI_RELEASE':
+      releaseAiLockFor(sender);
+      sendResponse({ ok: true });
+      return false;
+
     default:
       return false;
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * Browser-wide AI mutex
+ * --------------------------------------------------------------------
+ * Gemini Nano executes one session at a time. Without serialization,
+ * concurrent scans from multiple tabs get their sessions destroyed by
+ * Chrome (InvalidStateError) or queue invisibly. Content scripts acquire
+ * this lock before any inference and release it when done.
+ * ------------------------------------------------------------------ */
+
+const AI_LOCK_MAX_HOLD_MS = 400000; // > worst case local(180s) + bridge(200s)
+let aiLockHolder = null;            // { tabId, token }
+const aiWaiters = [];               // FIFO: { tabId, sendResponse }
+let aiLockTimer = null;
+
+function acquireAiLock(sender, sendResponse) {
+  const tabId = sender.tab?.id ?? null;
+  if (!aiLockHolder) {
+    grantAiLock(tabId, sendResponse);
+  } else {
+    aiWaiters.push({ tabId, sendResponse }); // response deferred until grant
+  }
+  return true; // keep the message channel open
+}
+
+function grantAiLock(tabId, sendResponse) {
+  const token = {};
+  aiLockHolder = { tabId, token };
+  clearTimeout(aiLockTimer);
+  // Last-resort release if the holder's tab crashes without releasing.
+  // (Best-effort: a suspending service worker may delay this timer; the
+  // tabs.onRemoved / navigation handlers below are the reliable paths.)
+  aiLockTimer = setTimeout(() => {
+    if (aiLockHolder?.token === token) forceReleaseAiLock();
+  }, AI_LOCK_MAX_HOLD_MS);
+  try {
+    sendResponse({ granted: true });
+  } catch {
+    forceReleaseAiLock(); // waiter vanished before grant
+  }
+}
+
+function releaseAiLockFor(sender) {
+  const tabId = sender.tab?.id ?? null;
+  if (aiLockHolder && aiLockHolder.tabId === tabId) forceReleaseAiLock();
+}
+
+function forceReleaseAiLock() {
+  aiLockHolder = null;
+  clearTimeout(aiLockTimer);
+  while (aiWaiters.length) {
+    const next = aiWaiters.shift();
+    try {
+      grantAiLock(next.tabId, next.sendResponse);
+      return;
+    } catch {
+      // waiter's tab is gone — skip to the next one
+    }
+  }
+}
+
+// A tab that closes or navigates releases its content scripts — and any
+// lock they held.
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (aiLockHolder?.tabId === tabId) forceReleaseAiLock();
+  for (let i = aiWaiters.length - 1; i >= 0; i--) {
+    if (aiWaiters[i].tabId === tabId) aiWaiters.splice(i, 1);
   }
 });
 
@@ -80,6 +157,10 @@ chrome.tabs.onActivated.addListener(async ({ tabId }) => {
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'loading') {
+    if (aiLockHolder?.tabId === tabId) forceReleaseAiLock();
+    for (let i = aiWaiters.length - 1; i >= 0; i--) {
+      if (aiWaiters[i].tabId === tabId) aiWaiters.splice(i, 1);
+    }
     chrome.action.setBadgeText({ tabId, text: '' }).catch(() => {});
   }
   if (changeInfo.status === 'complete' && tab.url) {

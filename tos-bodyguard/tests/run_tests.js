@@ -26,7 +26,7 @@ const waitFor = async (fn, timeout = 3000) => {
  * ------------------------------------------------------------------ */
 
 function loadContentScript(overrides = {}) {
-  const storage = {};
+  const storage = { ...(overrides.initialStorage || {}) };
   const sentMessages = [];
   const messageListeners = [];
   const consoleErrors = [];
@@ -49,7 +49,9 @@ function loadContentScript(overrides = {}) {
       onMessage: { addListener: (fn) => messageListeners.push(fn) },
       sendMessage: async (msg) => {
         sentMessages.push(msg);
-        return overrides.onSendMessage ? overrides.onSendMessage(msg) : { ok: true };
+        if (overrides.onSendMessage) return overrides.onSendMessage(msg);
+        if (msg.type === 'AI_ACQUIRE') return { granted: true };
+        return { ok: true };
       },
     },
     storage: {
@@ -335,13 +337,83 @@ async function testLanguageModelNamespaceUsesResponseConstraint() {
   console.log('PASS LanguageModel path sends responseConstraint JSON schema');
 }
 
+
+async function testAnalysisHoldsAndReleasesMutex() {
+  const { sentMessages, sendManualScan } = loadContentScript({
+    ai: aiReturning('{"total_risks_found":0,"risks":[]}'),
+    bodyText: 'policy text',
+  });
+  await sendManualScan();
+  const types = sentMessages.map((m) => m.type);
+  assert.ok(types.includes('AI_ACQUIRE'), 'must acquire the AI lock');
+  assert.ok(types.includes('AI_RELEASE'), 'must release the AI lock');
+  assert.ok(types.indexOf('AI_ACQUIRE') < types.indexOf('AI_RELEASE'));
+  console.log('PASS analysis acquires then releases the browser-wide AI mutex');
+}
+
+async function testNegativeResultBacksOff() {
+  // A recent failure must NOT trigger a fresh AI run on the next pageview.
+  let aiCreated = false;
+  const ai = {
+    languageModel: {
+      capabilities: async () => ({ available: 'readily' }),
+      create: async () => { aiCreated = true; return { prompt: async () => '{}', destroy: () => {} }; },
+    },
+  };
+  const anchors = [
+    { textContent: 'Privacy Policy', href: 'https://example.com/privacy', closest: () => ({}) },
+  ];
+  const fetchMock = async (url) => {
+    if (String(url).endsWith('rules.json')) return { json: async () => [] };
+    return { ok: true, text: async () => '<body>policy</body>' };
+  };
+  const { sentMessages } = loadContentScript({
+    ai,
+    anchors,
+    fetch: fetchMock,
+    initialStorage: {
+      'example.com': { status: 'error', error: 'AI timed out', updatedAt: Date.now() },
+    },
+  });
+  await waitFor(() =>
+    sentMessages.some((m) => m.type === 'ANALYSIS_COMPLETE' && m.status === 'error')
+  );
+  assert.strictEqual(aiCreated, false, 'AI must not run within the negative-cache window');
+  console.log('PASS recent failure backs off instead of re-running inference');
+}
+
+async function testInvalidStateErrorRetriesOnce() {
+  // Chrome destroys sessions of backgrounded tabs; a fresh session recovers.
+  let creates = 0;
+  const ai = {
+    languageModel: {
+      capabilities: async () => ({ available: 'readily' }),
+      create: async () => {
+        creates++;
+        if (creates === 1) {
+          return {
+            prompt: async () => { throw new DOMException('The model execution session has been destroyed.', 'InvalidStateError'); },
+            destroy: () => {},
+          };
+        }
+        return { prompt: async () => '{"total_risks_found":0,"risks":[]}', destroy: () => {} };
+      },
+    },
+  };
+  const { sendManualScan } = loadContentScript({ ai, bodyText: 'policy text' });
+  const resp = await sendManualScan();
+  assert.strictEqual(resp.status, 'complete');
+  assert.strictEqual(creates, 2, 'exactly one retry with a fresh session');
+  console.log('PASS InvalidStateError retries once with a fresh session');
+}
+
 /* ------------------------------------------------------------------ *
  * background.js harness + tests
  * ------------------------------------------------------------------ */
 
 function loadBackground(overrides = {}) {
   const badge = { text: [], color: [] };
-  const listeners = { message: [] };
+  const listeners = { message: [], removed: [] };
 
   const chromeMock = {
     runtime: { onMessage: { addListener: (fn) => listeners.message.push(fn) } },
@@ -352,6 +424,7 @@ function loadBackground(overrides = {}) {
     tabs: {
       onActivated: { addListener: () => {} },
       onUpdated: { addListener: () => {} },
+      onRemoved: { addListener: (fn) => listeners.removed.push(fn) },
       get: async (id) => ({ id, url: 'https://example.com/' }),
     },
     storage: { local: { get: async () => ({}) } },
@@ -440,6 +513,40 @@ async function testMainWorldBridgeNoAi() {
   console.log('PASS MAIN-world bridge reports ai-unavailable when API missing');
 }
 
+
+async function testAiMutexSerialization() {
+  const { listeners } = loadBackground();
+  const handler = listeners.message[0];
+
+  let r1 = null;
+  handler({ type: 'AI_ACQUIRE' }, { tab: { id: 1 } }, (r) => (r1 = r));
+  assert.deepEqual(r1, { granted: true });
+
+  let r2 = null;
+  handler({ type: 'AI_ACQUIRE' }, { tab: { id: 2 } }, (r) => (r2 = r));
+  await new Promise((res) => setImmediate(res));
+  assert.strictEqual(r2, null); // queued, not granted
+
+  handler({ type: 'AI_RELEASE' }, { tab: { id: 1 } }, () => {});
+  assert.deepEqual(r2, { granted: true }); // FIFO handoff
+  console.log('PASS AI mutex serializes across tabs with FIFO handoff');
+}
+
+async function testAiMutexReleasedOnTabClose() {
+  const { listeners } = loadBackground();
+  const handler = listeners.message[0];
+
+  handler({ type: 'AI_ACQUIRE' }, { tab: { id: 1 } }, () => {});
+  let r2 = null;
+  handler({ type: 'AI_ACQUIRE' }, { tab: { id: 2 } }, (r) => (r2 = r));
+  await new Promise((res) => setImmediate(res));
+  assert.strictEqual(r2, null);
+
+  listeners.removed[0](1); // holder's tab closed without releasing
+  assert.deepEqual(r2, { granted: true });
+  console.log('PASS AI mutex auto-releases when the holder tab closes');
+}
+
 /* ------------------------------------------------------------------ *
  * Runner
  * ------------------------------------------------------------------ */
@@ -458,10 +565,15 @@ async function testMainWorldBridgeNoAi() {
     testCreateOptionsRejectedRetriesDefaults,
     testAbortSkipsBridgeAndFailsFast,
     testLanguageModelNamespaceUsesResponseConstraint,
+    testAnalysisHoldsAndReleasesMutex,
+    testNegativeResultBacksOff,
+    testInvalidStateErrorRetriesOnce,
     testBadgeColors,
     testFetchRelayStripsHtml,
     testMainWorldBridge,
     testMainWorldBridgeNoAi,
+    testAiMutexSerialization,
+    testAiMutexReleasedOnTabClose,
   ];
   let failed = 0;
   for (const t of tests) {
