@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TOS Bodyguard</title>
+  <!--
+    Why not <script src="https://cdn.tailwindcss.com">?
+    Manifest V3 forbids remotely-hosted code in extension pages
+    (CSP: script-src 'self'), so the Tailwind Play CDN is blocked in popups.
+    We ship popup.css — a tiny local stylesheet providing the Tailwind-compatible
+    utility classes used below. To use the full framework, bundle Tailwind's
+    compiled CSS at build time (e.g. `npx tailwindcss -o popup.css --minify`).
+  -->
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body class="w-80 bg-slate-50 font-sans text-slate-800">
+
+  <header class="flex items-center gap-2 bg-indigo-600 px-4 py-3 text-white">
+    <span class="text-xl" aria-hidden="true">🛡️</span>
+    <div class="flex-1 min-w-0">
+      <h1 class="text-sm font-bold leading-tight">TOS Bodyguard</h1>
+      <p id="hostname" class="truncate text-xs text-indigo-200">…</p>
+    </div>
+  </header>
+
+  <!-- Rendered by popup.js: loading / results / empty / error states -->
+  <main id="content" class="max-h-96 overflow-y-auto p-4"></main>
+
+  <footer class="px-4 pb-4">
+    <button
+      id="scan-btn"
+      class="w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-indigo-700 disabled:opacity-50"
+      type="button"
+    >
+      🔍 Scan Current Page
+    </button>
+    <p class="mt-2 text-center text-xs text-slate-400">
+      100% on-device analysis · Gemini Nano · no data leaves this browser
+    </p>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

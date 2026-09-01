@@ -1,0 +1,47 @@
+[
+  {
+    "domain": "example.com",
+    "cmp": "DemoRule (example)",
+    "rejectSelector": "#cookie-banner button.reject-all"
+  },
+  {
+    "domain": "myshop.example",
+    "cmp": "DemoRule (subdomain matching demo)",
+    "rejectSelector": ".consent-modal [data-action='reject']"
+  },
+  {
+    "domain": "*",
+    "cmp": "OneTrust",
+    "rejectSelector": "#onetrust-reject-all-handler"
+  },
+  {
+    "domain": "*",
+    "cmp": "Cookiebot",
+    "rejectSelector": "#CybotCookiebotDialogBodyButtonDecline"
+  },
+  {
+    "domain": "*",
+    "cmp": "Didomi",
+    "rejectSelector": "#didomi-notice-disagree-button"
+  },
+  {
+    "domain": "*",
+    "cmp": "Osano",
+    "rejectSelector": ".osano-cm-denyAll"
+  },
+  {
+    "domain": "*",
+    "cmp": "CookieYes",
+    "rejectSelector": ".cky-btn-reject"
+  },
+  {
+    "domain": "*",
+    "cmp": "Quantcast",
+    "rejectSelector": ".qc-cmp2-summary-buttons button[mode='secondary']"
+  },
+  {
+    "domain": "*",
+    "cmp": "Generic (aria-label)",
+    "rejectSelector": "button[aria-label*='reject all' i]"
+  }
+]

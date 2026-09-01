@@ -1,0 +1,117 @@
+/**
+ * TOS Bodyguard — popup.css
+ * -------------------------
+ * Manifest V3 extension pages may not load remote scripts (CSP:
+ * script-src 'self'), which rules out the Tailwind Play CDN. This file
+ * provides the exact set of Tailwind-compatible utility classes used by
+ * popup.html / popup.js, so the markup stays idiomatic Tailwind and can
+ * be swapped for a real compiled Tailwind build without changes.
+ */
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+
+/* ---- Layout ---- */
+.w-80        { width: 20rem; }
+.w-full      { width: 100%; }
+.w-8         { width: 2rem; }
+.h-8         { height: 2rem; }
+.min-w-0     { min-width: 0; }
+.max-h-96    { max-height: 24rem; }
+.overflow-y-auto { overflow-y: auto; }
+.flex        { display: flex; }
+.flex-col    { flex-direction: column; }
+.flex-1      { flex: 1 1 0%; }
+.items-center { align-items: center; }
+.justify-between { justify-content: space-between; }
+.gap-2       { gap: 0.5rem; }
+.gap-3       { gap: 0.75rem; }
+.text-center { text-align: center; }
+.truncate    { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.break-words { overflow-wrap: break-word; }
+.select-none { user-select: none; }
+.cursor-pointer { cursor: pointer; }
+.space-y-2 > * + * { margin-top: 0.5rem; }
+
+/* ---- Spacing ---- */
+.p-3  { padding: 0.75rem; }
+.p-4  { padding: 1rem; }
+.px-2 { padding-left: 0.5rem; padding-right: 0.5rem; }
+.px-4 { padding-left: 1rem; padding-right: 1rem; }
+.py-0\.5 { padding-top: 0.125rem; padding-bottom: 0.125rem; }
+.py-2 { padding-top: 0.5rem; padding-bottom: 0.5rem; }
+.py-3 { padding-top: 0.75rem; padding-bottom: 0.75rem; }
+.py-6 { padding-top: 1.5rem; padding-bottom: 1.5rem; }
+.py-8 { padding-top: 2rem; padding-bottom: 2rem; }
+.px-4.pb-4, .pb-4 { padding-bottom: 1rem; }
+.pl-2 { padding-left: 0.5rem; }
+.mt-1 { margin-top: 0.25rem; }
+.mt-2 { margin-top: 0.5rem; }
+.mb-3 { margin-bottom: 0.75rem; }
+
+/* ---- Typography ---- */
+.font-sans { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+.text-xs   { font-size: 0.75rem; line-height: 1rem; }
+.text-sm   { font-size: 0.875rem; line-height: 1.25rem; }
+.text-xl   { font-size: 1.25rem; line-height: 1.75rem; }
+.text-3xl  { font-size: 1.875rem; line-height: 2.25rem; }
+.font-medium   { font-weight: 500; }
+.font-semibold { font-weight: 600; }
+.font-bold     { font-weight: 700; }
+.leading-tight { line-height: 1.25; }
+.italic { font-style: italic; }
+
+/* ---- Colors ---- */
+.text-white       { color: #fff; }
+.text-slate-400   { color: #94a3b8; }
+.text-slate-500   { color: #64748b; }
+.text-slate-700   { color: #334155; }
+.text-slate-800   { color: #1e293b; }
+.text-indigo-200  { color: #c7d2fe; }
+.text-indigo-600  { color: #4f46e5; }
+.text-red-600     { color: #dc2626; }
+.text-red-700     { color: #b91c1c; }
+.text-green-600   { color: #16a34a; }
+.text-green-700   { color: #15803d; }
+.text-amber-700   { color: #b45309; }
+
+.bg-white      { background-color: #fff; }
+.bg-slate-50   { background-color: #f8fafc; }
+.bg-indigo-600 { background-color: #4f46e5; }
+.bg-red-50     { background-color: #fef2f2; }
+.bg-red-100    { background-color: #fee2e2; }
+.bg-green-50   { background-color: #f0fdf4; }
+.bg-amber-100  { background-color: #fef3c7; }
+
+.hover\:bg-indigo-700:hover { background-color: #4338ca; }
+
+/* ---- Borders & radius ---- */
+.border        { border-width: 1px; border-style: solid; }
+.border-4      { border-width: 4px; border-style: solid; }
+.border-l-2    { border-left-width: 2px; border-left-style: solid; }
+.border-slate-200 { border-color: #e2e8f0; }
+.border-slate-300 { border-color: #cbd5e1; }
+.border-red-200   { border-color: #fecaca; }
+.border-green-200 { border-color: #bbf7d0; }
+.border-indigo-200 { border-color: #c7d2fe; }
+.border-t-indigo-600 { border-top-color: #4f46e5; }
+.rounded-lg    { border-radius: 0.5rem; }
+.rounded-full  { border-radius: 9999px; }
+.shadow-sm     { box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05); }
+
+/* ---- States & animation ---- */
+.disabled\:opacity-50:disabled, button:disabled { opacity: 0.5; cursor: not-allowed; }
+.transition-colors { transition-property: background-color, border-color, color; transition-duration: 150ms; }
+
+@keyframes tos-spin { to { transform: rotate(360deg); } }
+.animate-spin { animation: tos-spin 1s linear infinite; }
+
+/* ---- Native element polish ---- */
+button { font-family: inherit; border: none; cursor: pointer; }
+button:focus-visible, summary:focus-visible {
+  outline: 2px solid #4f46e5;
+  outline-offset: 2px;
+}
+details > summary { list-style: none; }
+details > summary::before { content: "▸ "; }
+details[open] > summary::before { content: "▾ "; }
