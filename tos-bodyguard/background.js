@@ -46,6 +46,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       cloudTest(msg).then(sendResponse);
       return true; // async
 
+    case 'PING':
+      // Lets the popup detect a stale service worker (popup/content scripts
+      // reload from disk automatically; a resident SW does not).
+      sendResponse({
+        ok: true,
+        version: chrome.runtime.getManifest().version,
+        features: ['cloud', 'queue', 'mutex'],
+      });
+      return false;
+
     case 'AI_ACQUIRE':
       return acquireAiLock(sender, sendResponse, msg.hostname);
 
@@ -446,7 +456,7 @@ async function runCloudAnalysis({ text, hostname, scanId }) {
       const firstErr = results.find((r) => typeof r === 'string' && r.startsWith('__ERROR__'));
       return { ok: false, error: firstErr ? firstErr.slice('__ERROR__:'.length) : 'cloud-failed' };
     }
-    return { ok: true, text: mergeChunkResults(good) };
+    return { ok: true, text: mergeChunkResults(good), engine: `${cfg.name} · ${model}` };
   } catch (err) {
     return { ok: false, error: String(err?.message || err) };
   }

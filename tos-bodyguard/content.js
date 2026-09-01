@@ -271,6 +271,7 @@ TEXT TO ANALYZE:
     // Cloud provider configured? Use it — fast, full-document (chunked in the
     // service worker), and not bound by the local AI mutex. The API key is
     // only ever read by the service worker; this context sends just the text.
+    let cloudFailed = null;
     const settings = (await chrome.storage.local.get('settings').catch(() => ({})))?.settings || {};
     const provider = settings.provider || 'nano';
     if (provider !== 'nano' && settings.keys?.[provider]) {
@@ -278,8 +279,11 @@ TEXT TO ANALYZE:
       const cloud = await chrome.runtime
         .sendMessage({ type: 'RUN_AI_CLOUD', text: rawText.slice(0, 100000), hostname: HOSTNAME, scanId })
         .catch(() => null);
-      if (cloud?.ok) return { status: 'complete', result: parseAIResponse(cloud.text) };
-      console.warn('[TOS Bodyguard] Cloud analysis failed — falling back to on-device AI:', cloud?.error);
+      if (cloud?.ok) {
+        return { status: 'complete', result: parseAIResponse(cloud.text), engine: cloud.engine || provider };
+      }
+      cloudFailed = cloud?.error || 'unreachable';
+      console.warn('[TOS Bodyguard] Cloud analysis failed — falling back to on-device AI:', cloudFailed);
     }
 
     // Serialize on-device inference browser-wide via the service worker.
@@ -296,9 +300,13 @@ TEXT TO ANALYZE:
 
     try {
       // Token count → progress: 45% baseline + up to 50 more as output streams in.
-      return await runAnalysis(rawText, scanId, (chars) =>
+      const out = await runAnalysis(rawText, scanId, (chars) =>
         reportProgress('Analyzing with on-device AI…', 45 + Math.min(50, (chars / 800) * 50), false, scanId)
       );
+      if (out.status === 'complete' && cloudFailed) {
+        out.engine = `${out.engine || 'nano (on-device)'} — ${provider} failed, used fallback`;
+      }
+      return out;
     } finally {
       if (lock?.granted) {
         chrome.runtime.sendMessage({ type: 'AI_RELEASE' }).catch(() => {});
@@ -355,7 +363,7 @@ TEXT TO ANALYZE:
                 ? await promptWithStreaming(session, prompt, promptOpts, onChars)
                 : await session.prompt(prompt, promptOpts);
             clearTimeout(timer);
-            return { status: 'complete', result: parseAIResponse(output) };
+            return { status: 'complete', result: parseAIResponse(output), engine: 'nano (on-device)' };
           } finally {
             try { session.destroy?.(); } catch { /* noop */ }
           }
@@ -395,7 +403,7 @@ TEXT TO ANALYZE:
       .sendMessage({ type: 'RUN_AI_MAINWORLD', prompt: bridgePrompt, schema: RISK_SCHEMA })
       .catch(() => null);
 
-    if (bridged?.ok) return { status: 'complete', result: parseAIResponse(bridged.text) };
+    if (bridged?.ok) return { status: 'complete', result: parseAIResponse(bridged.text), engine: 'nano (on-device · page context)' };
     if (bridged?.error === 'timeout') {
       return { status: 'error', error: 'AI timed out — the on-device model is CPU-bound or busy. Try again.' };
     }
@@ -601,7 +609,7 @@ TEXT TO ANALYZE:
       const analysis = await analyzeText(combined, scanId);
       await autoSave(
         analysis.status === 'complete'
-          ? { status: 'complete', result: analysis.result, links }
+          ? { status: 'complete', result: analysis.result, links, engine: analysis.engine }
           : analysis
       );
     } catch (err) {
@@ -637,7 +645,7 @@ TEXT TO ANALYZE:
     const analysis = await analyzeText(pageText, scanId);
     const payload =
       analysis.status === 'complete'
-        ? { status: 'complete', result: analysis.result, links: [location.href] }
+        ? { status: 'complete', result: analysis.result, links: [location.href], engine: analysis.engine }
         : analysis;
     await saveAndNotify(payload, scanId);
     return payload;

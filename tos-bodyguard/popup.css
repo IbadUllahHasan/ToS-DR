@@ -60,6 +60,7 @@ html, body { margin: 0; padding: 0; }
 .font-bold     { font-weight: 700; }
 .leading-tight { line-height: 1.25; }
 .italic { font-style: italic; }
+.underline { text-decoration: underline; }
 
 /* ---- Colors ---- */
 .text-white       { color: #fff; }

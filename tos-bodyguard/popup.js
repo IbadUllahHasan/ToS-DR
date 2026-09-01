@@ -41,6 +41,16 @@ async function init() {
     return;
   }
 
+  // Stale-service-worker detection: popup/content scripts reload from disk
+  // automatically; a resident service worker does not. If it predates the
+  // cloud features, offer a one-click reload.
+  const ping = await chrome.runtime.sendMessage({ type: 'PING' }).catch(() => null);
+  if (!ping?.features?.includes('cloud')) {
+    const banner = document.getElementById('reload-banner');
+    banner.classList.remove('hidden');
+    document.getElementById('reload-ext').addEventListener('click', () => chrome.runtime.reload());
+  }
+
   await loadAndRender();
   await initSettings();
 
@@ -268,6 +278,10 @@ function renderResults(root, entry) {
   );
   header.append(scoreBox, summaryBox);
   root.append(header);
+
+  if (entry.engine) {
+    root.append(el('p', 'mb-3 text-center text-xs text-slate-400', `Analyzed by: ${entry.engine}`));
+  }
 
   if (risks.length === 0) return;
 

@@ -514,7 +514,7 @@ async function testCloudProviderPathSkipsMutex() {
     onSendMessage: (msg) => {
       sentTypes.push(msg.type);
       if (msg.type === 'RUN_AI_CLOUD') {
-        return { ok: true, text: '{"total_risks_found":3,"risks":[{"category":"DATA_RESALE","severity":"HIGH","summary":"a","exact_quote":"q1"},{"category":"LEGAL_TRAPS","severity":"MEDIUM","summary":"b","exact_quote":"q2"},{"category":"SHADOW_PROFILING","severity":"MEDIUM","summary":"c","exact_quote":"q3"}]}' };
+        return { ok: true, engine: 'groq · llama-x', text: '{"total_risks_found":3,"risks":[{"category":"DATA_RESALE","severity":"HIGH","summary":"a","exact_quote":"q1"},{"category":"LEGAL_TRAPS","severity":"MEDIUM","summary":"b","exact_quote":"q2"},{"category":"SHADOW_PROFILING","severity":"MEDIUM","summary":"c","exact_quote":"q3"}]}' };
       }
       if (msg.type === 'AI_ACQUIRE') return { granted: true };
       return { ok: true };
@@ -525,7 +525,8 @@ async function testCloudProviderPathSkipsMutex() {
   assert.strictEqual(resp.result.total_risks_found, 3);
   assert.ok(sentTypes.includes('RUN_AI_CLOUD'), 'cloud path used');
   assert.ok(!sentTypes.includes('AI_ACQUIRE'), 'cloud path must not take the local mutex');
-  console.log('PASS cloud provider path used, local mutex skipped');
+  assert.strictEqual(resp.engine, 'groq · llama-x', 'engine recorded from cloud response');
+  console.log('PASS cloud provider path used, local mutex skipped, engine recorded');
 }
 
 async function testCloudFailureFallsBackToLocal() {
@@ -546,7 +547,9 @@ async function testCloudFailureFallsBackToLocal() {
   const resp = await sendManualScan();
   assert.strictEqual(resp.status, 'complete');
   assert.ok(sentTypes.includes('RUN_AI_CLOUD') && sentTypes.includes('AI_ACQUIRE'));
-  console.log('PASS cloud failure falls back to on-device Nano');
+  assert.ok(resp.engine.includes('nano'), 'engine says nano');
+  assert.ok(resp.engine.includes('failed'), 'fallback annotated');
+  console.log('PASS cloud failure falls back to on-device Nano (engine annotated)');
 }
 
 /* ------------------------------------------------------------------ *
@@ -559,7 +562,10 @@ function loadBackground(overrides = {}) {
   const listeners = { message: [], removed: [] };
 
   const chromeMock = {
-    runtime: { onMessage: { addListener: (fn) => listeners.message.push(fn) } },
+    runtime: {
+      onMessage: { addListener: (fn) => listeners.message.push(fn) },
+      getManifest: () => ({ version: '1.3.1' }),
+    },
     action: {
       setBadgeText: async (o) => badge.text.push(o),
       setBadgeBackgroundColor: async (o) => badge.color.push(o),
@@ -779,6 +785,35 @@ async function testCloudTestEndpoint() {
   console.log('PASS CLOUD_TEST validates keys with a tiny request');
 }
 
+
+async function testPingReportsVersionAndFeatures() {
+  const { listeners } = loadBackground();
+  const resp = await new Promise((resolve) =>
+    listeners.message[0]({ type: 'PING' }, {}, resolve)
+  );
+  assert.strictEqual(resp.ok, true);
+  assert.strictEqual(resp.version, '1.3.1');
+  assert.ok(resp.features.includes('cloud'));
+  console.log('PASS PING reports version + feature set (stale-SW detection)');
+}
+
+async function testCloudResponseCarriesEngine() {
+  const fetchMock = async () => ({
+    ok: true,
+    json: async () => ({ choices: [{ message: { content: '{"total_risks_found":0,"risks":[]}' } }] }),
+  });
+  const { listeners } = loadBackground({
+    fetch: fetchMock,
+    localData: { settings: { provider: 'groq', keys: { groq: 'k' }, models: {} } },
+  });
+  const resp = await new Promise((resolve) =>
+    listeners.message[0]({ type: 'RUN_AI_CLOUD', text: 'short', hostname: 'h', scanId: 's' }, { tab: { id: 1 } }, resolve)
+  );
+  assert.ok(resp.ok);
+  assert.strictEqual(resp.engine, 'Groq · llama-3.3-70b-versatile');
+  console.log('PASS cloud response identifies the engine used');
+}
+
 /* ------------------------------------------------------------------ *
  * Runner
  * ------------------------------------------------------------------ */
@@ -816,6 +851,8 @@ async function testCloudTestEndpoint() {
     testCloudChunkingMergeDedupe,
     testCloudErrorSurfaced,
     testCloudTestEndpoint,
+    testPingReportsVersionAndFeatures,
+    testCloudResponseCarriesEngine,
   ];
   let failed = 0;
   for (const t of tests) {
