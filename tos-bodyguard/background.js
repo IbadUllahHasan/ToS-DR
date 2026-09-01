@@ -38,6 +38,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       runPromptInMainWorld(sender.tab?.id, msg.prompt, msg.schema).then(sendResponse);
       return true; // async
 
+    case 'RUN_AI_CLOUD':
+      runCloudAnalysis(msg).then(sendResponse);
+      return true; // async
+
+    case 'CLOUD_TEST':
+      cloudTest(msg).then(sendResponse);
+      return true; // async
+
     case 'AI_ACQUIRE':
       return acquireAiLock(sender, sendResponse, msg.hostname);
 
@@ -243,6 +251,217 @@ function stripHtml(html) {
     .replace(/&#39;|&apos;/gi, "'")
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/* ------------------------------------------------------------------ *
+ * Cloud AI providers (optional fast alternative to on-device Nano)
+ * --------------------------------------------------------------------
+ * The API key is read here, in the service worker, straight from storage
+ * — it is never sent to or visible in any page/content-script context.
+ * Long policies are analyzed in overlapping chunks (map) and merged with
+ * dedupe (reduce), so the WHOLE document is checked — not just the start.
+ * ------------------------------------------------------------------ */
+
+const CLOUD_PROVIDERS = {
+  gemini:  { name: 'Google Gemini', defaultModel: 'gemini-2.5-flash' },
+  groq:    { name: 'Groq',          defaultModel: 'llama-3.3-70b-versatile' },
+  openai:  { name: 'OpenAI',        defaultModel: 'gpt-4o-mini' },
+  minimax: { name: 'MiniMax',       defaultModel: 'MiniMax-Text-01' },
+};
+
+const CLOUD_MAX_TEXT = 100000;     // ~25k tokens — plenty for full policies
+const CLOUD_CHUNK_SIZE = 12000;    // chars per analysis chunk
+const CLOUD_CHUNK_OVERLAP = 400;   // catch clauses split across a boundary
+
+/**
+ * Stricter, plain-language prompt for cloud models (the on-device Nano path
+ * keeps the original mandated prompt verbatim).
+ */
+const CLOUD_PROMPT_TEMPLATE = `You are a strict privacy analyzer. Read the text and identify clauses hostile to user privacy.
+Scan for these 5 categories: DATA_RESALE, INFINITE_RETENTION, AGGRESSIVE_TRACKING, LEGAL_TRAPS, SHADOW_PROFILING.
+
+CONSTRAINTS:
+- Be thorough: review the ENTIRE text section by section. Real policies usually contain several issues — do not stop at the first one.
+- Flag a risk whenever the text explicitly permits the practice; do not give the policy the benefit of the doubt.
+- Write each summary in simple everyday language a non-lawyer understands (max 2 short sentences) and say WHY it hurts the user.
+- Output strictly in valid JSON format.
+- Do NOT wrap in markdown blocks (no \`\`\`json).
+
+OUTPUT SCHEMA:
+{
+  "total_risks_found": number,
+  "risks": [
+    {
+      "category": "String (From the 5 categories)",
+      "severity": "String (HIGH or MEDIUM)",
+      "summary": "String (plain-English explanation)",
+      "exact_quote": "String (Verbatim quote from text)"
+    }
+  ]
+}
+
+TEXT TO ANALYZE:
+[INSERT_SCRAPED_TEXT]`;
+
+function chunkText(text) {
+  if (text.length <= CLOUD_CHUNK_SIZE) return [text];
+  const chunks = [];
+  for (let i = 0; i < text.length; i += CLOUD_CHUNK_SIZE - CLOUD_CHUNK_OVERLAP) {
+    chunks.push(text.slice(i, i + CLOUD_CHUNK_SIZE));
+  }
+  return chunks;
+}
+
+async function callCloudProvider(provider, model, apiKey, prompt) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60000);
+  try {
+    let res;
+    if (provider === 'gemini') {
+      res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.1, responseMimeType: 'application/json' },
+          }),
+          signal: controller.signal,
+        }
+      );
+    } else {
+      const endpoints = {
+        groq: 'https://api.groq.com/openai/v1/chat/completions',
+        openai: 'https://api.openai.com/v1/chat/completions',
+        minimax: 'https://api.minimax.io/v1/chat/completions',
+      };
+      const body = { model, messages: [{ role: 'user', content: prompt }], temperature: 0.1 };
+      if (provider !== 'minimax') body.response_format = { type: 'json_object' };
+      res = await fetch(endpoints[provider], {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    }
+
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(`${provider} HTTP ${res.status}: ${detail.slice(0, 200)}`);
+    }
+    const data = await res.json();
+    if (provider === 'gemini') {
+      return data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') ?? '';
+    }
+    return data?.choices?.[0]?.message?.content ?? '';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function tolerantParseJson(raw) {
+  try {
+    let cleaned = String(raw ?? '').replace(/```json|```/g, '').trim();
+    const s = cleaned.indexOf('{');
+    const e = cleaned.lastIndexOf('}');
+    if (s !== -1 && e > s) cleaned = cleaned.slice(s, e + 1);
+    return JSON.parse(cleaned);
+  } catch {
+    return null;
+  }
+}
+
+/** Merge chunk results, dedupe by quote, cap at 25 risks. */
+function mergeChunkResults(texts) {
+  const risks = [];
+  const seen = new Set();
+  for (const text of texts) {
+    const parsed = tolerantParseJson(text);
+    if (!parsed || !Array.isArray(parsed.risks)) continue;
+    for (const r of parsed.risks) {
+      const key = String(r.exact_quote || r.summary || '')
+        .toLowerCase().replace(/\s+/g, ' ').slice(0, 80);
+      if (key && seen.has(key)) continue;
+      if (key) seen.add(key);
+      risks.push({
+        category: String(r.category ?? 'UNKNOWN').slice(0, 60),
+        severity: r.severity === 'HIGH' ? 'HIGH' : 'MEDIUM',
+        summary: String(r.summary ?? '').slice(0, 500),
+        exact_quote: String(r.exact_quote ?? '').slice(0, 1000),
+      });
+      if (risks.length >= 25) break;
+    }
+    if (risks.length >= 25) break;
+  }
+  return JSON.stringify({ total_risks_found: risks.length, risks });
+}
+
+/** SW-side progress write, guarded by the owning scan's id. */
+async function reportCloudProgress(hostname, scanId, phase, percent) {
+  if (!hostname) return;
+  try {
+    const existing = (await chrome.storage.local.get(hostname))[hostname];
+    if (existing?.status !== 'loading' || (scanId && existing.scanId !== scanId)) return;
+    await chrome.storage.local.set({
+      [hostname]: { ...existing, progress: { phase, percent: Math.round(percent) } },
+    });
+  } catch { /* best-effort */ }
+}
+
+async function runCloudAnalysis({ text, hostname, scanId }) {
+  try {
+    const settings = (await chrome.storage.local.get('settings')).settings || {};
+    const provider = settings.provider;
+    const cfg = CLOUD_PROVIDERS[provider];
+    if (!cfg) return { ok: false, error: 'unknown-provider' };
+    const apiKey = settings.keys?.[provider];
+    if (!apiKey) return { ok: false, error: 'no-api-key' };
+    const model = settings.models?.[provider] || cfg.defaultModel;
+
+    const chunks = chunkText(String(text || '').slice(0, CLOUD_MAX_TEXT));
+    const results = new Array(chunks.length);
+    let done = 0;
+    let cursor = 0;
+
+    // Two chunks in flight at a time — gentle on provider rate limits.
+    async function worker() {
+      while (cursor < chunks.length) {
+        const i = cursor++;
+        const prompt = CLOUD_PROMPT_TEMPLATE.replace('[INSERT_SCRAPED_TEXT]', chunks[i]);
+        results[i] = await callCloudProvider(provider, model, apiKey, prompt)
+          .catch((e) => `__ERROR__:${e.message}`);
+        done++;
+        reportCloudProgress(
+          hostname, scanId,
+          `Cloud analysis (${cfg.name}) — part ${done}/${chunks.length}`,
+          45 + (done / chunks.length) * 50
+        );
+      }
+    }
+    await Promise.all([worker(), worker()]);
+
+    const good = results.filter((r) => typeof r === 'string' && !r.startsWith('__ERROR__'));
+    if (good.length === 0) {
+      const firstErr = results.find((r) => typeof r === 'string' && r.startsWith('__ERROR__'));
+      return { ok: false, error: firstErr ? firstErr.slice('__ERROR__:'.length) : 'cloud-failed' };
+    }
+    return { ok: true, text: mergeChunkResults(good) };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+}
+
+async function cloudTest({ provider, apiKey, model }) {
+  try {
+    const cfg = CLOUD_PROVIDERS[provider];
+    if (!cfg) return { ok: false, error: 'Unknown provider' };
+    if (!apiKey) return { ok: false, error: 'Enter an API key first' };
+    const out = await callCloudProvider(provider, model || cfg.defaultModel, apiKey, 'Reply with the single word: ok');
+    return out && out.trim() ? { ok: true } : { ok: false, error: 'Empty response' };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
 }
 
 /* ------------------------------------------------------------------ *

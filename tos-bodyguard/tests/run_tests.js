@@ -505,6 +505,50 @@ async function testStreamingLegacyPrefixChunks() {
   console.log('PASS streaming (legacy full-prefix chunks) parsed without duplication');
 }
 
+
+async function testCloudProviderPathSkipsMutex() {
+  const sentTypes = [];
+  const { sendManualScan } = loadContentScript({
+    bodyText: 'policy text',
+    initialStorage: { settings: { provider: 'groq', keys: { groq: 'key123' }, models: {} } },
+    onSendMessage: (msg) => {
+      sentTypes.push(msg.type);
+      if (msg.type === 'RUN_AI_CLOUD') {
+        return { ok: true, text: '{"total_risks_found":3,"risks":[{"category":"DATA_RESALE","severity":"HIGH","summary":"a","exact_quote":"q1"},{"category":"LEGAL_TRAPS","severity":"MEDIUM","summary":"b","exact_quote":"q2"},{"category":"SHADOW_PROFILING","severity":"MEDIUM","summary":"c","exact_quote":"q3"}]}' };
+      }
+      if (msg.type === 'AI_ACQUIRE') return { granted: true };
+      return { ok: true };
+    },
+  });
+  const resp = await sendManualScan();
+  assert.strictEqual(resp.status, 'complete');
+  assert.strictEqual(resp.result.total_risks_found, 3);
+  assert.ok(sentTypes.includes('RUN_AI_CLOUD'), 'cloud path used');
+  assert.ok(!sentTypes.includes('AI_ACQUIRE'), 'cloud path must not take the local mutex');
+  console.log('PASS cloud provider path used, local mutex skipped');
+}
+
+async function testCloudFailureFallsBackToLocal() {
+  const captured = {};
+  const ai = aiReturning('{"total_risks_found":0,"risks":[]}', captured);
+  const sentTypes = [];
+  const { sendManualScan } = loadContentScript({
+    ai,
+    bodyText: 'policy text',
+    initialStorage: { settings: { provider: 'openai', keys: { openai: 'bad-key' } } },
+    onSendMessage: (msg) => {
+      sentTypes.push(msg.type);
+      if (msg.type === 'RUN_AI_CLOUD') return { ok: false, error: 'openai HTTP 401' };
+      if (msg.type === 'AI_ACQUIRE') return { granted: true };
+      return { ok: true };
+    },
+  });
+  const resp = await sendManualScan();
+  assert.strictEqual(resp.status, 'complete');
+  assert.ok(sentTypes.includes('RUN_AI_CLOUD') && sentTypes.includes('AI_ACQUIRE'));
+  console.log('PASS cloud failure falls back to on-device Nano');
+}
+
 /* ------------------------------------------------------------------ *
  * background.js harness + tests
  * ------------------------------------------------------------------ */
@@ -527,13 +571,13 @@ function loadBackground(overrides = {}) {
       get: async (id) => ({ id, url: 'https://example.com/' }),
     },
     storage: {
-      local: { get: async () => ({}) },
+      local: { get: async () => overrides.localData || {} },
       session: { set: async (obj) => sessionWrites.push(obj), get: async () => ({}) },
     },
     scripting: { executeScript: overrides.executeScript || (async () => [{ result: { ok: true, text: '{}' } }]) },
   };
 
-  const sandbox = { chrome: chromeMock, fetch: overrides.fetch, console, URL, setTimeout, clearTimeout };
+  const sandbox = { chrome: chromeMock, fetch: overrides.fetch, console, URL, setTimeout, clearTimeout, AbortController };
   vm.createContext(sandbox);
   if (overrides.env) overrides.env.sandbox = sandbox; // lets tests inject MAIN-world globals
   vm.runInContext(read('background.js'), sandbox, { filename: 'background.js' });
@@ -677,6 +721,64 @@ async function testQueueStatePublished() {
   console.log('PASS queue state published to storage.session (current + waiting)');
 }
 
+
+async function testCloudChunkingMergeDedupe() {
+  const bodies = [];
+  const fetchMock = async (url, opts) => {
+    bodies.push(JSON.parse(opts.body));
+    const n = bodies.length;
+    const risks =
+      n === 1 ? [{ category: 'DATA_RESALE', severity: 'HIGH', summary: 's1', exact_quote: 'quote-one' }]
+      : n === 2 ? [
+          { category: 'LEGAL_TRAPS', severity: 'MEDIUM', summary: 's2', exact_quote: 'quote-two' },
+          { category: 'DATA_RESALE', severity: 'HIGH', summary: 's1-dup', exact_quote: 'quote-one' }, // dup
+        ]
+      : [{ category: 'LEGAL_TRAPS', severity: 'MEDIUM', summary: 's2-again', exact_quote: 'quote-two' }]; // dup
+    return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({ total_risks_found: risks.length, risks }) } }] }) };
+  };
+  const { listeners } = loadBackground({
+    fetch: fetchMock,
+    localData: { settings: { provider: 'groq', keys: { groq: 'k' }, models: {} } },
+  });
+  const text = 'a'.repeat(25000); // > 2 chunks of 12000
+  const resp = await new Promise((resolve) =>
+    listeners.message[0]({ type: 'RUN_AI_CLOUD', text, hostname: 'h.com', scanId: 's' }, { tab: { id: 1 } }, resolve)
+  );
+  assert.ok(resp.ok, 'cloud analysis ok');
+  assert.strictEqual(bodies.length, 3, '25,000 chars -> 3 overlapping chunks');
+  const merged = JSON.parse(resp.text);
+  assert.strictEqual(merged.total_risks_found, 2, 'duplicate quotes deduped across chunks');
+  console.log('PASS cloud analysis chunks long text, merges + dedupes risks');
+}
+
+async function testCloudErrorSurfaced() {
+  const fetchMock = async () => ({ ok: false, status: 401, text: async () => 'invalid api key' });
+  const { listeners } = loadBackground({
+    fetch: fetchMock,
+    localData: { settings: { provider: 'openai', keys: { openai: 'bad' } } },
+  });
+  const resp = await new Promise((resolve) =>
+    listeners.message[0]({ type: 'RUN_AI_CLOUD', text: 'short text', hostname: 'h', scanId: 's' }, { tab: { id: 1 } }, resolve)
+  );
+  assert.strictEqual(resp.ok, false);
+  assert.ok(resp.error.includes('401'), 'HTTP detail surfaced');
+  console.log('PASS cloud provider errors surface with HTTP detail');
+}
+
+async function testCloudTestEndpoint() {
+  const fetchMock = async () => ({ ok: true, json: async () => ({ choices: [{ message: { content: 'ok' } }] }) });
+  const { listeners } = loadBackground({ fetch: fetchMock });
+  const resp = await new Promise((resolve) =>
+    listeners.message[0]({ type: 'CLOUD_TEST', provider: 'groq', apiKey: 'k', model: 'm' }, {}, resolve)
+  );
+  assert.deepEqual(resp, { ok: true });
+  const bad = await new Promise((resolve) =>
+    listeners.message[0]({ type: 'CLOUD_TEST', provider: 'groq', apiKey: '', model: 'm' }, {}, resolve)
+  );
+  assert.strictEqual(bad.ok, false);
+  console.log('PASS CLOUD_TEST validates keys with a tiny request');
+}
+
 /* ------------------------------------------------------------------ *
  * Runner
  * ------------------------------------------------------------------ */
@@ -702,6 +804,8 @@ async function testQueueStatePublished() {
     testInvalidStateErrorRetriesOnce,
     testStreamingDeltaChunksDriveProgress,
     testStreamingLegacyPrefixChunks,
+    testCloudProviderPathSkipsMutex,
+    testCloudFailureFallsBackToLocal,
     testBadgeColors,
     testFetchRelayStripsHtml,
     testMainWorldBridge,
@@ -709,6 +813,9 @@ async function testQueueStatePublished() {
     testAiMutexSerialization,
     testAiMutexReleasedOnTabClose,
     testQueueStatePublished,
+    testCloudChunkingMergeDedupe,
+    testCloudErrorSurfaced,
+    testCloudTestEndpoint,
   ];
   let failed = 0;
   for (const t of tests) {

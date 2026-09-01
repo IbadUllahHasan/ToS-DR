@@ -16,7 +16,14 @@ const CATEGORY_EMOJI = {
   SHADOW_PROFILING: '🕵️',
 };
 
-const state = { tab: null, hostname: null };
+const PROVIDER_DEFAULT_MODELS = {
+  gemini: 'gemini-2.5-flash',
+  groq: 'llama-3.3-70b-versatile',
+  openai: 'gpt-4o-mini',
+  minimax: 'MiniMax-Text-01',
+};
+
+const state = { tab: null, hostname: null, settings: null };
 
 document.addEventListener('DOMContentLoaded', init);
 
@@ -35,6 +42,7 @@ async function init() {
   }
 
   await loadAndRender();
+  await initSettings();
 
   // Live queue state (written by the service worker's AI mutex).
   const sess = await chrome.storage.session.get('aiQueue');
@@ -57,6 +65,75 @@ async function loadAndRender() {
     return;
   }
   render(entry);
+}
+
+/* ------------------------------------------------------------------ *
+ * Settings: AI provider + API keys (stored locally, read only by the
+ * service worker when making the actual request)
+ * ------------------------------------------------------------------ */
+
+async function initSettings() {
+  const panel = document.getElementById('settings');
+  const providerSel = document.getElementById('provider');
+  const keyFields = document.getElementById('key-fields');
+  const keyInput = document.getElementById('api-key');
+  const modelInput = document.getElementById('model');
+  const status = document.getElementById('settings-status');
+
+  const stored = await chrome.storage.local.get('settings').catch(() => ({}));
+  state.settings = { provider: 'nano', keys: {}, models: {}, ...(stored.settings || {}) };
+  providerSel.value = state.settings.provider;
+  syncProviderFields();
+  updateEngineNote();
+
+  document.getElementById('settings-toggle').addEventListener('click', () => {
+    panel.classList.toggle('hidden');
+  });
+
+  providerSel.addEventListener('change', syncProviderFields);
+
+  function syncProviderFields() {
+    const p = providerSel.value;
+    keyFields.classList.toggle('hidden', p === 'nano');
+    keyInput.value = state.settings.keys?.[p] || '';
+    modelInput.value = state.settings.models?.[p] || PROVIDER_DEFAULT_MODELS[p] || '';
+    status.textContent = '';
+  }
+
+  document.getElementById('save-settings').addEventListener('click', async () => {
+    const p = providerSel.value;
+    state.settings = {
+      provider: p,
+      keys: { ...(state.settings.keys || {}), [p]: keyInput.value.trim() },
+      models: { ...(state.settings.models || {}), [p]: modelInput.value.trim() || PROVIDER_DEFAULT_MODELS[p] },
+    };
+    await chrome.storage.local.set({ settings: state.settings });
+    status.textContent = 'Saved ✓';
+    updateEngineNote();
+    setTimeout(() => { status.textContent = ''; }, 2500);
+  });
+
+  document.getElementById('test-key').addEventListener('click', async () => {
+    status.textContent = 'Testing…';
+    const resp = await chrome.runtime.sendMessage({
+      type: 'CLOUD_TEST',
+      provider: providerSel.value,
+      apiKey: keyInput.value.trim(),
+      model: modelInput.value.trim() || PROVIDER_DEFAULT_MODELS[providerSel.value],
+    }).catch(() => null);
+    status.textContent = resp?.ok ? 'Works ✓' : `Failed: ${resp?.error || 'no response'}`;
+  });
+}
+
+function updateEngineNote() {
+  const note = document.getElementById('engine-note');
+  if (!note) return;
+  const s = state.settings;
+  if (s?.provider && s.provider !== 'nano' && s.keys?.[s.provider]) {
+    note.textContent = `Engine: ${s.provider} · ${s.models?.[s.provider] || PROVIDER_DEFAULT_MODELS[s.provider]} · full-document scan`;
+  } else {
+    note.textContent = 'Engine: on-device Gemini Nano · 100% local · ⚙️ add a cloud API key for speed';
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -175,10 +252,12 @@ function renderResults(root, entry) {
     (total > 0 ? 'border-red-200 bg-red-50' : 'border-green-200 bg-green-50'));
 
   const scoreBox = el('div', 'text-center');
-  scoreBox.append(
-    el('div', 'text-3xl font-bold ' + (total > 0 ? 'text-red-600' : 'text-green-600'), String(score)),
-    el('div', 'text-xs text-slate-500', 'risk score')
+  const scoreLine = el('div', 'flex items-baseline gap-1');
+  scoreLine.append(
+    el('span', 'text-3xl font-bold ' + (total > 0 ? 'text-red-600' : 'text-green-600'), String(score)),
+    el('span', 'text-sm font-semibold text-slate-400', '/100')
   );
+  scoreBox.append(scoreLine, el('div', 'text-xs text-slate-500', 'risk score'));
 
   const summaryBox = el('div', 'flex-1');
   summaryBox.append(

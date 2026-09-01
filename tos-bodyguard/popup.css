@@ -109,6 +109,18 @@ html, body { margin: 0; padding: 0; }
 .mb-2 { margin-bottom: 0.5rem; }
 .transition-all { transition-property: all; transition-duration: 300ms; transition-timing-function: ease; }
 
+.block { display: block; }
+.items-baseline { align-items: baseline; }
+.gap-1 { gap: 0.25rem; }
+.py-1 { padding-top: 0.25rem; padding-bottom: 0.25rem; }
+.px-3 { padding-left: 0.75rem; padding-right: 0.75rem; }
+.mb-1 { margin-bottom: 0.25rem; }
+.border-b { border-bottom-width: 1px; border-bottom-style: solid; }
+.text-slate-600 { color: #475569; }
+.hover\:bg-slate-100:hover { background-color: #f1f5f9; }
+input, select { font-family: inherit; }
+input:focus-visible, select:focus-visible { outline: 2px solid #4f46e5; outline-offset: 1px; }
+
 /* ---- States & animation ---- */
 .disabled\:opacity-50:disabled, button:disabled { opacity: 0.5; cursor: not-allowed; }
 .transition-colors { transition-property: background-color, border-color, color; transition-duration: 150ms; }

@@ -268,6 +268,20 @@ TEXT TO ANALYZE:
 
 
   async function analyzeText(rawText, scanId) {
+    // Cloud provider configured? Use it — fast, full-document (chunked in the
+    // service worker), and not bound by the local AI mutex. The API key is
+    // only ever read by the service worker; this context sends just the text.
+    const settings = (await chrome.storage.local.get('settings').catch(() => ({})))?.settings || {};
+    const provider = settings.provider || 'nano';
+    if (provider !== 'nano' && settings.keys?.[provider]) {
+      await reportProgress(`Analyzing with ${provider} cloud AI…`, 45, true, scanId);
+      const cloud = await chrome.runtime
+        .sendMessage({ type: 'RUN_AI_CLOUD', text: rawText.slice(0, 100000), hostname: HOSTNAME, scanId })
+        .catch(() => null);
+      if (cloud?.ok) return { status: 'complete', result: parseAIResponse(cloud.text) };
+      console.warn('[TOS Bodyguard] Cloud analysis failed — falling back to on-device AI:', cloud?.error);
+    }
+
     // Serialize on-device inference browser-wide via the service worker.
     // Gemini Nano executes ONE session at a time: concurrent scans from
     // multiple tabs get their sessions destroyed (InvalidStateError) or are

@@ -15,7 +15,14 @@ built-in AI (Gemini Nano via the Prompt API) to surface user-hostile clauses.
 - **Cookie-banner auto-reject** — clicks "Reject All" using per-domain rules (`rules.json`).
 - **Manual scan** — analyze any page directly from the popup.
 - **Live queue + progress bar** — see which site the on-device AI is reading,
-  which sites are waiting, and real generation progress (via ).
+  which sites are waiting, and real generation progress (via promptStreaming).
+- **Optional cloud providers** — bring your own Gemini / Groq / OpenAI / MiniMax
+  API key (gear icon in the popup) for fast, full-document analysis: the policy
+  is split into overlapping chunks, analyzed in parallel, and merged with dedupe
+  — the whole document is checked, not just the first 8,000 chars. Cloud
+  summaries use a stricter, plain-English prompt. Keys are stored locally and
+  read only by the service worker; with a cloud provider, policy text leaves
+  your device for analysis.
 - **Privacy by design** — no network calls with page content; everything runs locally.
 
 ## Install
