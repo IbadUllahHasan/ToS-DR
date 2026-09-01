@@ -277,6 +277,8 @@ const CLOUD_PROVIDERS = {
   groq:    { name: 'Groq',          defaultModel: 'openai/gpt-oss-120b' },
   openai:  { name: 'OpenAI',        defaultModel: 'gpt-4o-mini' },
   minimax: { name: 'MiniMax',       defaultModel: 'MiniMax-Text-01' },
+  deepseek: { name: 'DeepSeek',     defaultModel: 'deepseek-chat' },
+  glm:     { name: 'GLM (Zhipu)',   defaultModel: 'glm-4.6' },
 };
 
 const CLOUD_MAX_TEXT = 100000;     // ~25k tokens — plenty for full policies
@@ -347,6 +349,8 @@ async function callCloudProvider(provider, model, apiKey, prompt) {
         groq: 'https://api.groq.com/openai/v1/chat/completions',
         openai: 'https://api.openai.com/v1/chat/completions',
         minimax: 'https://api.minimax.io/v1/chat/completions',
+        deepseek: 'https://api.deepseek.com/chat/completions',
+        glm: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
       };
       const body = { model, messages: [{ role: 'user', content: prompt }], temperature: 0.1 };
       if (provider !== 'minimax') body.response_format = { type: 'json_object' };

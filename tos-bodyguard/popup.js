@@ -21,6 +21,8 @@ const PROVIDER_DEFAULT_MODELS = {
   groq: 'openai/gpt-oss-120b',
   openai: 'gpt-4o-mini',
   minimax: 'MiniMax-Text-01',
+  deepseek: 'deepseek-chat',
+  glm: 'glm-4.6',
 };
 
 const PROVIDER_NAMES = {
@@ -28,6 +30,8 @@ const PROVIDER_NAMES = {
   groq: 'Groq',
   openai: 'OpenAI',
   minimax: 'MiniMax',
+  deepseek: 'DeepSeek',
+  glm: 'GLM (Zhipu)',
 };
 
 /** Human label for the currently-configured analysis engine. */
