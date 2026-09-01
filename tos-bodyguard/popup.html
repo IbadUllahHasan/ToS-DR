@@ -23,6 +23,11 @@
       <p id="hostname" class="truncate text-xs text-indigo-200">…</p>
     </div>
     <button
+      id="theme-toggle"
+      class="rounded-lg px-2 py-1 text-sm text-indigo-200 transition-colors hover:bg-indigo-700"
+      type="button" title="Toggle dark mode" aria-label="Toggle dark mode"
+    >🌙</button>
+    <button
       id="settings-toggle"
       class="rounded-lg px-2 py-1 text-sm text-indigo-200 transition-colors hover:bg-indigo-700"
       type="button" title="Settings" aria-label="Settings"
@@ -35,6 +40,18 @@
     <button id="reload-ext" type="button" class="font-semibold underline">reload to activate</button>,
     then refresh the page.
   </div>
+
+  <!-- First-run setup guide (shown once, then dismissed) -->
+  <section id="onboarding" class="hidden border-b border-indigo-200 bg-indigo-50 px-4 py-3 text-xs text-slate-700">
+    <p class="mb-1 text-sm font-semibold">👋 Welcome! One-time setup (≈1 min)</p>
+    <ol class="list-decimal space-y-1 pl-4">
+      <li><b>Option A — free &amp; 100% private (on-device Nano):</b> open <code>chrome://flags</code>, enable <b>Prompt API for Gemini Nano</b> and <b>Optimization Guide On Device Model</b> (set to <i>BypassPerfRequirement</i>), restart Chrome, and let the model download.</li>
+      <li><b>Option B — fastest (cloud):</b> tap ⚙️ above, pick Gemini / Groq / OpenAI / MiniMax, paste your API key → Test key → Save.</li>
+      <li>Browse normally — the toolbar badge shows the hostile-clause count per site; click it for the full report.</li>
+    </ol>
+    <button id="dismiss-onboarding" type="button"
+      class="mt-2 rounded-lg bg-indigo-600 px-3 py-1 font-semibold text-white transition-colors hover:bg-indigo-700">Got it ✓</button>
+  </section>
 
   <!-- AI provider settings (hidden until ⚙️) -->
   <section id="settings" class="hidden border-b border-slate-200 bg-white px-4 py-3">
@@ -55,7 +72,8 @@
         class="mb-2 w-full rounded-lg border border-slate-300 px-2 py-1 text-sm" />
       <p class="mb-2 text-xs text-slate-400">
         Key stays in this browser and is only sent to the provider. With a cloud
-        provider, policy text leaves your device for analysis.
+        provider, policy text leaves your device for analysis. Model 404? Check
+        the provider's current model names — providers rename/retire them often.
       </p>
       <div class="flex items-center gap-2">
         <button id="test-key" type="button"

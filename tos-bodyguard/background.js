@@ -274,7 +274,7 @@ function stripHtml(html) {
 
 const CLOUD_PROVIDERS = {
   gemini:  { name: 'Google Gemini', defaultModel: 'gemini-2.5-flash' },
-  groq:    { name: 'Groq',          defaultModel: 'llama-3.3-70b-versatile' },
+  groq:    { name: 'Groq',          defaultModel: 'openai/gpt-oss-120b' },
   openai:  { name: 'OpenAI',        defaultModel: 'gpt-4o-mini' },
   minimax: { name: 'MiniMax',       defaultModel: 'MiniMax-Text-01' },
 };

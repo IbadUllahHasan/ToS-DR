@@ -56,6 +56,7 @@ html, body { margin: 0; padding: 0; }
 .text-sm   { font-size: 0.875rem; line-height: 1.25rem; }
 .text-xl   { font-size: 1.25rem; line-height: 1.75rem; }
 .text-3xl  { font-size: 1.875rem; line-height: 2.25rem; }
+.font-normal   { font-weight: 400; }
 .font-medium   { font-weight: 500; }
 .font-semibold { font-weight: 600; }
 .font-bold     { font-weight: 700; }
@@ -123,6 +124,42 @@ html, body { margin: 0; padding: 0; }
 .hover\:bg-slate-100:hover { background-color: #f1f5f9; }
 input, select { font-family: inherit; }
 input:focus-visible, select:focus-visible { outline: 2px solid #4f46e5; outline-offset: 1px; }
+
+/* ---- Chips, lists, code ---- */
+.chip { border: 1px solid #cbd5e1; border-radius: 9999px; padding: 0.125rem 0.5rem; font-size: 0.75rem; font-weight: 600; color: #475569; background: #fff; cursor: pointer; }
+.chip-active { background: #4f46e5; border-color: #4f46e5; color: #fff; }
+.list-decimal { list-style: decimal; }
+.pl-4 { padding-left: 1rem; }
+.space-y-1 > * + * { margin-top: 0.25rem; }
+.py-4 { padding-top: 1rem; padding-bottom: 1rem; }
+.flex-wrap { flex-wrap: wrap; }
+code { background: #e2e8f0; border-radius: 0.25rem; padding: 0 0.25rem; font-size: 0.7rem; }
+
+/* ---- Dark mode (body.dark) ---- */
+body.dark { background-color: #0f172a; color: #e2e8f0; }
+body.dark .bg-slate-50 { background-color: #0f172a; }
+body.dark .bg-white { background-color: #1e293b; }
+body.dark .text-slate-800, body.dark .text-slate-700 { color: #e2e8f0; }
+body.dark .text-slate-600 { color: #cbd5e1; }
+body.dark .text-slate-500 { color: #94a3b8; }
+body.dark .text-slate-400 { color: #64748b; }
+body.dark .border-slate-200, body.dark .border-slate-300 { border-color: #334155; }
+body.dark .bg-slate-200 { background-color: #334155; }
+body.dark .bg-indigo-50 { background-color: #1e1b4b; }
+body.dark .bg-red-50 { background-color: #3f1d1d; }
+body.dark .bg-green-50 { background-color: #052e16; }
+body.dark .border-red-200 { border-color: #7f1d1d; }
+body.dark .border-green-200 { border-color: #14532d; }
+body.dark .bg-red-100 { background-color: #7f1d1d; }
+body.dark .bg-amber-100 { background-color: #78350f; }
+body.dark .text-red-700 { color: #fca5a5; }
+body.dark .text-green-700 { color: #86efac; }
+body.dark .text-amber-700 { color: #fcd34d; }
+body.dark .chip { background: #1e293b; border-color: #334155; color: #cbd5e1; }
+body.dark .chip-active { background: #4f46e5; border-color: #4f46e5; color: #fff; }
+body.dark input, body.dark select { background-color: #1e293b; color: #e2e8f0; border-color: #475569; }
+body.dark code { background: #334155; }
+body.dark .shadow-sm { box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.4); }
 
 /* ---- States & animation ---- */
 .disabled\:opacity-50:disabled, button:disabled { opacity: 0.5; cursor: not-allowed; }

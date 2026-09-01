@@ -18,7 +18,7 @@ const CATEGORY_EMOJI = {
 
 const PROVIDER_DEFAULT_MODELS = {
   gemini: 'gemini-2.5-flash',
-  groq: 'llama-3.3-70b-versatile',
+  groq: 'openai/gpt-oss-120b',
   openai: 'gpt-4o-mini',
   minimax: 'MiniMax-Text-01',
 };
@@ -39,7 +39,13 @@ function engineLabel() {
   return 'on-device AI';
 }
 
-const state = { tab: null, hostname: null, settings: null };
+const state = {
+  tab: null,
+  hostname: null,
+  settings: null,
+  filter: { severity: 'all', category: 'all' },
+  currentRisks: [],
+};
 
 document.addEventListener('DOMContentLoaded', init);
 
@@ -56,6 +62,9 @@ async function init() {
     document.getElementById('scan-btn').disabled = true;
     return;
   }
+
+  initTheme();
+  await maybeShowOnboarding();
 
   // Stale-service-worker detection: popup/content scripts reload from disk
   // automatically; a resident service worker does not. If it predates the
@@ -91,6 +100,47 @@ async function loadAndRender() {
     return;
   }
   render(entry);
+}
+
+/* ------------------------------------------------------------------ *
+ * Theme (light / dark; default follows the OS)
+ * ------------------------------------------------------------------ */
+
+async function initTheme() {
+  const btn = document.getElementById('theme-toggle');
+  const stored = await chrome.storage.local.get('theme').catch(() => ({}));
+  let theme = stored.theme || 'auto';
+  const media = matchMedia('(prefers-color-scheme: dark)');
+
+  const apply = () => {
+    const dark = theme === 'dark' || (theme === 'auto' && media.matches);
+    document.body.classList.toggle('dark', dark);
+    btn.textContent = dark ? '☀️' : '🌙';
+  };
+  apply();
+
+  btn.addEventListener('click', async () => {
+    theme = document.body.classList.contains('dark') ? 'light' : 'dark';
+    await chrome.storage.local.set({ theme });
+    apply();
+  });
+  media.addEventListener?.('change', () => { if (theme === 'auto') apply(); });
+}
+
+/* ------------------------------------------------------------------ *
+ * First-run setup guide (shown once)
+ * ------------------------------------------------------------------ */
+
+async function maybeShowOnboarding() {
+  const stored = await chrome.storage.local.get('hasSeenGuide').catch(() => ({}));
+  if (stored.hasSeenGuide) return;
+  const section = document.getElementById('onboarding');
+  if (!section) return;
+  section.classList.remove('hidden');
+  document.getElementById('dismiss-onboarding').addEventListener('click', async () => {
+    section.classList.add('hidden');
+    await chrome.storage.local.set({ hasSeenGuide: true });
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -301,39 +351,110 @@ function renderResults(root, entry) {
 
   if (risks.length === 0) return;
 
+  state.currentRisks = risks;
+  root.append(buildFilterBar(risks));
   const list = el('div', 'space-y-2');
-  for (const risk of risks) list.append(renderRiskCard(risk));
+  list.id = 'risk-list';
+  renderRiskList(list, risks);
   root.append(list);
 }
 
-function renderRiskCard(risk) {
-  const card = el('div', 'rounded-lg border border-slate-200 bg-white p-3 shadow-sm');
+function filteredRisks(risks) {
+  return risks.filter(
+    (r) =>
+      (state.filter.severity === 'all' || r.severity === state.filter.severity) &&
+      (state.filter.category === 'all' || r.category === state.filter.category)
+  );
+}
 
-  const topRow = el('div', 'flex items-center justify-between gap-2');
-  const emoji = CATEGORY_EMOJI[risk.category] || '⚠️';
-  topRow.append(
-    el('span', 'text-sm font-semibold', `${emoji} ${risk.category}`),
+function buildFilterBar(risks) {
+  const bar = el('div', 'mb-2 flex flex-wrap items-center gap-1');
+  bar.id = 'filter-bar';
+
+  const counts = {
+    all: risks.length,
+    HIGH: risks.filter((r) => r.severity === 'HIGH').length,
+    MEDIUM: risks.filter((r) => r.severity === 'MEDIUM').length,
+  };
+  for (const [key, label] of [['all', 'All'], ['HIGH', '🔴 High'], ['MEDIUM', '🟡 Medium']]) {
+    const chip = el('button', 'chip' + (state.filter.severity === key ? ' chip-active' : ''), `${label} (${counts[key]})`);
+    chip.type = 'button';
+    chip.addEventListener('click', () => {
+      state.filter.severity = key;
+      refreshRiskList();
+    });
+    bar.append(chip);
+  }
+
+  const cats = [...new Set(risks.map((r) => r.category))];
+  if (cats.length > 1) {
+    const sel = el('select', 'rounded-lg border border-slate-300 px-2 py-1 text-xs');
+    const allOpt = el('option', '', 'All categories');
+    allOpt.value = 'all';
+    sel.append(allOpt);
+    for (const c of cats) {
+      const o = el('option', '', `${CATEGORY_EMOJI[c] || '⚠️'} ${c}`);
+      o.value = c;
+      sel.append(o);
+    }
+    sel.value = state.filter.category;
+    sel.addEventListener('change', () => {
+      state.filter.category = sel.value;
+      refreshRiskList();
+    });
+    bar.append(sel);
+  }
+  return bar;
+}
+
+/** Re-render only the filter bar + list (header/score stay put). */
+function refreshRiskList() {
+  const bar = document.getElementById('filter-bar');
+  if (bar) bar.replaceWith(buildFilterBar(state.currentRisks));
+  const list = document.getElementById('risk-list');
+  if (list) renderRiskList(list, state.currentRisks);
+}
+
+function renderRiskList(list, risks) {
+  list.replaceChildren();
+  const shown = filteredRisks(risks);
+  if (shown.length === 0) {
+    list.append(el('p', 'py-4 text-center text-xs text-slate-400', 'No risks match this filter.'));
+    return;
+  }
+  for (const risk of shown) list.append(renderRiskCard(risk));
+}
+
+function renderRiskCard(risk) {
+  const card = el('details', 'rounded-lg border border-slate-200 bg-white p-3 shadow-sm');
+
+  // Collapsed row: emoji + category + summary preview + severity chip.
+  const row = el('summary', 'flex cursor-pointer select-none items-center justify-between gap-2');
+  const left = el('span', 'min-w-0 flex-1');
+  left.append(
+    el('span', 'text-sm font-semibold', `${CATEGORY_EMOJI[risk.category] || '⚠️'} ${risk.category}`),
+    el('span', 'block truncate text-xs font-normal text-slate-500', risk.summary)
+  );
+  row.append(
+    left,
     el('span',
       'rounded-full px-2 py-0.5 text-xs font-bold ' +
         (risk.severity === 'HIGH' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'),
       risk.severity)
   );
 
-  const summary = el('p', 'mt-1 text-sm text-slate-700', risk.summary);
-
+  // Expanded body: AI-written explanation (when present) + verbatim quote.
+  const body = el('div', 'mt-2');
+  body.append(el('p', 'text-sm text-slate-700', risk.summary));
   if (risk.explanation) {
-    const why = el('p', 'mt-2 rounded bg-slate-50 p-2 text-xs text-slate-600', `💡 ${risk.explanation}`);
-    card.append(topRow, summary, why);
-  } else {
-    card.append(topRow, summary);
+    body.append(el('p', 'mt-2 rounded bg-slate-50 p-2 text-xs text-slate-600', `💡 ${risk.explanation}`));
   }
+  body.append(
+    el('p', 'mt-2 text-xs font-medium text-slate-400', 'Exact quote from the policy:'),
+    el('blockquote', 'mt-1 break-words border-l-2 border-slate-300 pl-2 text-xs italic text-slate-500', `“${risk.exact_quote}”`)
+  );
 
-  const details = el('details', 'mt-2');
-  const toggle = el('summary', 'cursor-pointer select-none text-xs font-medium text-indigo-600', 'View exact quote');
-  const quote = el('blockquote', 'mt-1 break-words border-l-2 border-slate-300 pl-2 text-xs italic text-slate-500', `“${risk.exact_quote}”`);
-  details.append(toggle, quote);
-
-  card.append(details);
+  card.append(row, body);
   return card;
 }
 

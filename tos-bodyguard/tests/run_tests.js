@@ -813,7 +813,7 @@ async function testCloudResponseCarriesEngine() {
     listeners.message[0]({ type: 'RUN_AI_CLOUD', text: 'short', hostname: 'h', scanId: 's' }, { tab: { id: 1 } }, resolve)
   );
   assert.ok(resp.ok);
-  assert.strictEqual(resp.engine, 'Groq · llama-3.3-70b-versatile');
+  assert.strictEqual(resp.engine, 'Groq · openai/gpt-oss-120b');
   console.log('PASS cloud response identifies the engine used');
 }
 

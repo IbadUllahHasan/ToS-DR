@@ -23,7 +23,12 @@ built-in AI (Gemini Nano via the Prompt API) to surface user-hostile clauses.
   summaries use a stricter, plain-English prompt. Keys are stored locally and
   read only by the service worker; with a cloud provider, policy text leaves
   your device for analysis.
-- **Privacy by design** — no network calls with page content; everything runs locally.
+- **Filterable, expandable risk list** — severity chips + category filter;
+  cards stay collapsed until clicked.
+- **Light & dark mode** — follows your OS by default, toggle in the header.
+- **First-run setup guide** — one-time onboarding for Nano flags or cloud keys.
+- **Privacy by design** — no network calls with page content unless you
+  configure a cloud provider; everything else runs locally.
 
 ## Install
 
