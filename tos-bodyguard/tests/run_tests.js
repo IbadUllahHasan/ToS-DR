@@ -226,6 +226,70 @@ async function testCookieBannerAutoReject() {
   console.log('PASS cookie banner auto-rejected via rules.json selector');
 }
 
+
+async function testLocalAiDomExceptionFallsBackToBridge() {
+  // Reproduces the reported bug: create() throws DOMException (e.g.
+  // NotAllowedError while the model download requires user activation).
+  const ai = {
+    languageModel: {
+      capabilities: async () => ({ available: 'readily' }),
+      create: async () => { throw new DOMException('Session creation requires user activation.', 'NotAllowedError'); },
+    },
+  };
+  const { sendManualScan } = loadContentScript({
+    ai,
+    bodyText: 'policy text',
+    onSendMessage: (msg) =>
+      msg.type === 'RUN_AI_MAINWORLD'
+        ? { ok: true, text: '{"total_risks_found":0,"risks":[]}' }
+        : { ok: true },
+  });
+  const resp = await sendManualScan();
+  assert.strictEqual(resp.status, 'complete');
+  assert.deepEqual(resp.result, { total_risks_found: 0, risks: [] });
+  console.log('PASS local AI DOMException falls back to MAIN-world bridge');
+}
+
+async function testDomExceptionIsDescribedNotObjectified() {
+  const ai = {
+    languageModel: {
+      capabilities: async () => ({ available: 'readily' }),
+      create: async () => { throw new DOMException('Session creation requires user activation.', 'NotAllowedError'); },
+    },
+  };
+  const { storage, sendManualScan } = loadContentScript({
+    ai,
+    bodyText: 'policy text',
+    onSendMessage: (msg) => (msg.type === 'RUN_AI_MAINWORLD' ? { ok: false, error: 'ai-unavailable' } : { ok: true }),
+  });
+  const resp = await sendManualScan();
+  assert.strictEqual(resp.status, 'ai_unavailable');
+  assert.ok(resp.error.includes('NotAllowedError'), 'error should name the DOMException');
+  assert.ok(resp.error.includes('user activation'), 'error should include the message');
+  assert.ok(!resp.error.includes('[object'), 'must never stringify to [object DOMException]');
+  assert.strictEqual(storage['example.com'].error, resp.error);
+  console.log('PASS DOMException surfaces as "NotAllowedError: ..." in status + storage');
+}
+
+async function testCreateOptionsRejectedRetriesDefaults() {
+  let calls = 0;
+  const ai = {
+    languageModel: {
+      capabilities: async () => ({ available: 'readily' }),
+      create: async (opts) => {
+        calls++;
+        if (opts) throw new DOMException('Unsupported options', 'NotSupportedError');
+        return { prompt: async () => '{"total_risks_found":0,"risks":[]}', destroy: () => {} };
+      },
+    },
+  };
+  const { sendManualScan } = loadContentScript({ ai, bodyText: 'policy text' });
+  const resp = await sendManualScan();
+  assert.strictEqual(resp.status, 'complete');
+  assert.strictEqual(calls, 2); // options attempt + defaults retry
+  console.log('PASS create(options) rejection retries with defaults');
+}
+
 /* ------------------------------------------------------------------ *
  * background.js harness + tests
  * ------------------------------------------------------------------ */
@@ -343,6 +407,9 @@ async function testMainWorldBridgeNoAi() {
     testTruncation,
     testAiUnavailable,
     testCookieBannerAutoReject,
+    testLocalAiDomExceptionFallsBackToBridge,
+    testDomExceptionIsDescribedNotObjectified,
+    testCreateOptionsRejectedRetriesDefaults,
     testBadgeColors,
     testFetchRelayStripsHtml,
     testMainWorldBridge,

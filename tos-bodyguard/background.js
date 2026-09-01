@@ -178,7 +178,12 @@ async function runPromptInMainWorld(tabId, prompt) {
             return { ok: false, error: 'ai-unavailable' };
           }
 
-          const session = await api.create({ temperature: 0.1, topK: 3 });
+          let session;
+          try {
+            session = await api.create({ temperature: 0.1, topK: 3 });
+          } catch {
+            session = await api.create(); // some builds reject sampling options
+          }
           try {
             const text = await session.prompt(promptText);
             return { ok: true, text: String(text) };

@@ -61,7 +61,7 @@ function render(entry) {
     case 'complete':
       return renderResults(root, entry);
     case 'ai_unavailable':
-      return renderAiUnavailable(root);
+      return renderAiUnavailable(root, entry);
     case 'no_links':
       return renderInfo(
         '🔗',
@@ -143,11 +143,12 @@ function renderRiskCard(risk) {
   return card;
 }
 
-function renderAiUnavailable(root) {
+function renderAiUnavailable(root, entry) {
   renderInfo(
     '🤖',
     'Built-in AI unavailable',
-    'Chrome Built-in AI is not enabled. Please enable it in chrome://flags.'
+    'Chrome Built-in AI is not enabled. Please enable it in chrome://flags.' +
+      (entry?.error ? ` \u2014 Details: ${entry.error}` : '')
   );
 }
 

@@ -59,6 +59,24 @@ TEXT TO ANALYZE:
 [INSERT_SCRAPED_TEXT]`;
 
   /* ------------------------------------------------------------------ *
+   * Utilities
+   * ------------------------------------------------------------------ */
+
+  /**
+   * DOMException-aware error formatting. `instanceof` is unreliable across
+   * JS worlds (page main world vs. isolated content-script world), so we
+   * duck-type on .name/.message. Turns "[object DOMException]" into e.g.
+   * "NotAllowedError: Session creation requires user activation."
+   */
+  function describeError(err) {
+    if (!err) return 'Unknown error';
+    const name = typeof err.name === 'string' ? err.name : '';
+    const message = typeof err.message === 'string' ? err.message : '';
+    if (name && message) return `${name}: ${message}`;
+    return message || name || String(err);
+  }
+
+  /* ------------------------------------------------------------------ *
    * Boot
    * ------------------------------------------------------------------ */
 
@@ -77,7 +95,7 @@ TEXT TO ANALYZE:
     if (msg?.type === 'MANUAL_SCAN') {
       runManualScan()
         .then(sendResponse)
-        .catch((err) => sendResponse({ status: 'error', error: String(err?.message || err) }));
+        .catch((err) => sendResponse({ status: 'error', error: describeError(err) }));
       return true; // async response
     }
     return false;
@@ -210,22 +228,40 @@ TEXT TO ANALYZE:
     const prompt = AI_PROMPT_TEMPLATE.replace('[INSERT_SCRAPED_TEXT]', text);
 
     const api = getLocalAI();
+    let localError = null;
 
     if (api) {
-      const availability = await api.checkAvailability().catch(() => 'readily');
-      if (availability === 'no' || availability === 'unavailable') {
-        return { status: 'ai_unavailable' };
-      }
-
-      const session = await api.create({ temperature: 0.1, topK: 3 });
       try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
-        const output = await session.prompt(prompt, { signal: controller.signal });
-        clearTimeout(timer);
-        return { status: 'complete', result: parseAIResponse(output) };
-      } finally {
-        try { session.destroy?.(); } catch { /* noop */ }
+        const availability = await api.checkAvailability().catch(() => 'readily');
+        if (availability === 'no' || availability === 'unavailable') {
+          return { status: 'ai_unavailable' };
+        }
+
+        // Some builds reject sampling options — retry with defaults.
+        let session;
+        try {
+          session = await api.create({ temperature: 0.1, topK: 3 });
+        } catch (optErr) {
+          console.warn('[TOS Bodyguard] AI create(options) failed, retrying defaults:', describeError(optErr));
+          session = await api.create();
+        }
+
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+          const output = await session.prompt(prompt, { signal: controller.signal });
+          clearTimeout(timer);
+          return { status: 'complete', result: parseAIResponse(output) };
+        } finally {
+          try { session.destroy?.(); } catch { /* noop */ }
+        }
+      } catch (err) {
+        // Typically a DOMException from create()/prompt(): NotAllowedError
+        // (user activation required while the model downloads),
+        // NotSupportedError, QuotaExceededError, AbortError... Log it
+        // usefully, then give the MAIN-world bridge a second chance.
+        localError = err;
+        console.warn('[TOS Bodyguard] Local AI session failed:', describeError(err));
       }
     }
 
@@ -237,8 +273,15 @@ TEXT TO ANALYZE:
       .catch(() => null);
 
     if (bridged?.ok) return { status: 'complete', result: parseAIResponse(bridged.text) };
-    if (bridged?.error === 'ai-unavailable') return { status: 'ai_unavailable' };
-    return { status: 'ai_unavailable', error: bridged?.error || 'Chrome built-in AI not found.' };
+    if (bridged?.error === 'ai-unavailable') {
+      return localError
+        ? { status: 'ai_unavailable', error: describeError(localError) }
+        : { status: 'ai_unavailable' };
+    }
+    return {
+      status: 'ai_unavailable',
+      error: localError ? describeError(localError) : (bridged?.error || 'Chrome built-in AI not found.'),
+    };
   }
 
   /**
@@ -346,8 +389,8 @@ TEXT TO ANALYZE:
           : analysis
       );
     } catch (err) {
-      console.error('[TOS Bodyguard] Auto-scan failed:', err);
-      await saveAndNotify({ status: 'error', error: String(err?.message || err) }).catch(() => {});
+      console.error('[TOS Bodyguard] Auto-scan failed:', describeError(err), err);
+      await saveAndNotify({ status: 'error', error: describeError(err) }).catch(() => {});
     }
   }
 
