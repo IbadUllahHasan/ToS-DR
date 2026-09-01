@@ -36,15 +36,27 @@ async function init() {
 
   await loadAndRender();
 
+  // Live queue state (written by the service worker's AI mutex).
+  const sess = await chrome.storage.session.get('aiQueue');
+  renderQueue(sess.aiQueue);
+
   // Live-update while the popup is open (content script writes as it works).
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && changes[state.hostname]) loadAndRender();
+    if (area === 'session' && changes.aiQueue) renderQueue(changes.aiQueue.newValue);
   });
 }
 
 async function loadAndRender() {
   const data = await chrome.storage.local.get(state.hostname);
-  render(data[state.hostname]);
+  const entry = data[state.hostname];
+  // Fast path: scan still loading and only the progress moved — patch the bar
+  // in place instead of re-rendering (streaming writes several times a second).
+  if (entry?.status === 'loading' && entry.progress && document.getElementById('progress-fill')) {
+    updateProgressBar(entry.progress);
+    return;
+  }
+  render(entry);
 }
 
 /* ------------------------------------------------------------------ *
@@ -55,7 +67,7 @@ function render(entry) {
   const root = document.getElementById('content');
   root.replaceChildren();
 
-  if (!entry || entry.status === 'loading') return renderLoading(root);
+  if (!entry || entry.status === 'loading') return renderLoading(root, entry);
 
   switch (entry.status) {
     case 'complete':
@@ -74,14 +86,80 @@ function render(entry) {
   }
 }
 
-function renderLoading(root) {
+function renderLoading(root, entry) {
   root.replaceChildren();
   const wrap = el('div', 'flex flex-col items-center gap-3 py-8');
   const spinner = el('div', 'h-8 w-8 animate-spin rounded-full border-4 border-indigo-200 border-t-indigo-600');
   const label = el('p', 'text-sm text-slate-500 text-center', 'Analyzing policies with on-device AI…');
-  const sub = el('p', 'text-xs text-slate-400 text-center', 'On-device inference can take 1–3 min on CPU-only machines. Results cache for 30 min.');
-  wrap.append(spinner, label, sub);
+  wrap.append(spinner, label);
+  if (entry?.progress) {
+    wrap.append(buildProgressBar(entry.progress));
+  } else {
+    wrap.append(el('p', 'text-xs text-slate-400 text-center', 'On-device inference can take 1–3 min on CPU-only machines. Results cache for 30 min.'));
+  }
   root.append(wrap);
+}
+
+function buildProgressBar(progress) {
+  const box = el('div', 'mt-2 w-full');
+  const label = el('p', 'mb-2 text-center text-xs text-slate-500', progress.phase || 'Working…');
+  label.id = 'progress-label';
+  const track = el('div', 'h-2 w-full overflow-hidden rounded-full bg-slate-200');
+  const fill = el('div', 'h-2 rounded-full bg-indigo-600 transition-all');
+  fill.id = 'progress-fill';
+  fill.style.width = `${progress.percent || 0}%`;
+  track.append(fill);
+  box.append(label, track);
+  return box;
+}
+
+function updateProgressBar(progress) {
+  const fill = document.getElementById('progress-fill');
+  const label = document.getElementById('progress-label');
+  if (fill) fill.style.width = `${progress.percent || 0}%`;
+  if (label && progress.phase) label.textContent = progress.phase;
+}
+
+/* ------------------------------------------------------------------ *
+ * Live AI queue (which site is being read + which are waiting)
+ * ------------------------------------------------------------------ */
+
+function renderQueue(queueState) {
+  const section = document.getElementById('queue');
+  if (!section) return;
+  section.replaceChildren();
+
+  const current = queueState?.current;
+  const waiting = Array.isArray(queueState?.waiting) ? queueState.waiting : [];
+
+  if (!current && waiting.length === 0) {
+    section.classList.add('hidden');
+    return;
+  }
+  section.classList.remove('hidden');
+
+  if (current) {
+    const isMe = current.hostname === state.hostname;
+    const row = el('div', 'flex items-center gap-2 text-xs text-slate-700');
+    row.append(
+      el('span', '', '🤖'),
+      el('span', 'truncate font-semibold', current.hostname || 'unknown site'),
+      el('span', 'text-slate-400', isMe ? '— reading this site now' : '— reading now')
+    );
+    section.append(row);
+  }
+
+  if (waiting.length > 0) {
+    const names = [...new Set(waiting.map((w) => w.hostname || 'unknown site'))];
+    const myPos = waiting.findIndex((w) => w.hostname === state.hostname);
+    const row = el('div', 'mt-1 flex items-center gap-2 text-xs text-slate-500');
+    row.append(
+      el('span', '', '⏳'),
+      el('span', 'truncate',
+        `Queue: ${names.join(' · ')}` + (myPos >= 0 ? ` (this site is #${myPos + 1})` : ''))
+    );
+    section.append(row);
+  }
 }
 
 function renderResults(root, entry) {

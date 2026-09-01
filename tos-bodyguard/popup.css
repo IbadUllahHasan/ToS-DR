@@ -99,6 +99,16 @@ html, body { margin: 0; padding: 0; }
 .rounded-full  { border-radius: 9999px; }
 .shadow-sm     { box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05); }
 
+.hidden { display: none; }
+.h-2 { height: 0.5rem; }
+.bg-slate-200 { background-color: #e2e8f0; }
+.bg-indigo-50 { background-color: #eef2ff; }
+.border-t { border-top-width: 1px; border-top-style: solid; }
+.border-indigo-500 { border-color: #6366f1; }
+.overflow-hidden { overflow: hidden; }
+.mb-2 { margin-bottom: 0.5rem; }
+.transition-all { transition-property: all; transition-duration: 300ms; transition-timing-function: ease; }
+
 /* ---- States & animation ---- */
 .disabled\:opacity-50:disabled, button:disabled { opacity: 0.5; cursor: not-allowed; }
 .transition-colors { transition-property: background-color, border-color, color; transition-duration: 150ms; }

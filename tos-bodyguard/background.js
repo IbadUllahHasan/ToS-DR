@@ -39,7 +39,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true; // async
 
     case 'AI_ACQUIRE':
-      return acquireAiLock(sender, sendResponse);
+      return acquireAiLock(sender, sendResponse, msg.hostname);
 
     case 'AI_RELEASE':
       releaseAiLockFor(sender);
@@ -61,23 +61,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
  * ------------------------------------------------------------------ */
 
 const AI_LOCK_MAX_HOLD_MS = 400000; // > worst case local(180s) + bridge(200s)
-let aiLockHolder = null;            // { tabId, token }
-const aiWaiters = [];               // FIFO: { tabId, sendResponse }
+let aiLockHolder = null;            // { tabId, hostname, since, token }
+const aiWaiters = [];               // FIFO: { tabId, hostname, sendResponse }
 let aiLockTimer = null;
 
-function acquireAiLock(sender, sendResponse) {
+function acquireAiLock(sender, sendResponse, hostname) {
   const tabId = sender.tab?.id ?? null;
   if (!aiLockHolder) {
-    grantAiLock(tabId, sendResponse);
+    grantAiLock(tabId, sendResponse, hostname);
   } else {
-    aiWaiters.push({ tabId, sendResponse }); // response deferred until grant
+    aiWaiters.push({ tabId, hostname, sendResponse }); // response deferred until grant
   }
+  publishQueueState();
   return true; // keep the message channel open
 }
 
-function grantAiLock(tabId, sendResponse) {
+function grantAiLock(tabId, sendResponse, hostname) {
   const token = {};
-  aiLockHolder = { tabId, token };
+  aiLockHolder = { tabId, hostname, since: Date.now(), token };
   clearTimeout(aiLockTimer);
   // Last-resort release if the holder's tab crashes without releasing.
   // (Best-effort: a suspending service worker may delay this timer; the
@@ -103,12 +104,27 @@ function forceReleaseAiLock() {
   while (aiWaiters.length) {
     const next = aiWaiters.shift();
     try {
-      grantAiLock(next.tabId, next.sendResponse);
+      grantAiLock(next.tabId, next.sendResponse, next.hostname);
+      publishQueueState();
       return;
     } catch {
       // waiter's tab is gone — skip to the next one
     }
   }
+  publishQueueState();
+}
+
+/** Mirrors the live queue into storage.session so the popup can render it. */
+function publishQueueState() {
+  const state = {
+    current: aiLockHolder
+      ? { hostname: aiLockHolder.hostname || null, tabId: aiLockHolder.tabId, since: aiLockHolder.since }
+      : null,
+    waiting: aiWaiters.map((w) => ({ hostname: w.hostname || null, tabId: w.tabId })),
+  };
+  try {
+    chrome.storage.session?.set({ aiQueue: state }).catch(() => {});
+  } catch { /* storage.session unavailable — queue display is best-effort */ }
 }
 
 // A tab that closes or navigates releases its content scripts — and any
@@ -118,6 +134,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   for (let i = aiWaiters.length - 1; i >= 0; i--) {
     if (aiWaiters[i].tabId === tabId) aiWaiters.splice(i, 1);
   }
+  publishQueueState();
 });
 
 /* ------------------------------------------------------------------ *
@@ -161,6 +178,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     for (let i = aiWaiters.length - 1; i >= 0; i--) {
       if (aiWaiters[i].tabId === tabId) aiWaiters.splice(i, 1);
     }
+    publishQueueState();
     chrome.action.setBadgeText({ tabId, text: '' }).catch(() => {});
   }
   if (changeInfo.status === 'complete' && tab.url) {

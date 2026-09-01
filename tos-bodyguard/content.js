@@ -30,6 +30,10 @@
   const NEGATIVE_TTL_MS = 10 * 60 * 1000; // back off failures for 10 min (no retry storms)
   const AI_TIMEOUT_MS = 180 * 1000; // CPU-fallback inference on 8k chars can take minutes
 
+  // Mutable scan state — declared up here because boot() runs before the
+  // sections below are evaluated (let/const are not hoisted across them).
+  let lastProgressWrite = 0;
+
   /**
    * The exact analysis prompt. The scraped text is injected in place of
    * [INSERT_SCRAPED_TEXT]. (Backticks are escaped only to satisfy JS template
@@ -253,7 +257,7 @@ TEXT TO ANALYZE:
   }
 
 
-  async function analyzeText(rawText) {
+  async function analyzeText(rawText, scanId) {
     const text = rawText.slice(0, MAX_TEXT_CHARS);
     const prompt = AI_PROMPT_TEMPLATE.replace('[INSERT_SCRAPED_TEXT]', text);
 
@@ -261,12 +265,19 @@ TEXT TO ANALYZE:
     // Gemini Nano executes ONE session at a time: concurrent scans from
     // multiple tabs get their sessions destroyed (InvalidStateError) or are
     // serialized opaquely by Chrome — which looks like "forever" to users.
+    await reportProgress('Queued for the on-device AI…', 35, true, scanId);
+
     const lock = await chrome.runtime
-      .sendMessage({ type: 'AI_ACQUIRE' })
+      .sendMessage({ type: 'AI_ACQUIRE', hostname: HOSTNAME })
       .catch(() => null); // fail-open if the service worker is unreachable
 
+    await reportProgress('Analyzing with on-device AI…', 45, true, scanId);
+
     try {
-      return await runAnalysis(prompt);
+      // Token count → progress: 45% baseline + up to 50 more as output streams in.
+      return await runAnalysis(prompt, (chars) =>
+        reportProgress('Analyzing with on-device AI…', 45 + Math.min(50, (chars / 800) * 50), false, scanId)
+      );
     } finally {
       if (lock?.granted) {
         chrome.runtime.sendMessage({ type: 'AI_RELEASE' }).catch(() => {});
@@ -274,7 +285,7 @@ TEXT TO ANALYZE:
     }
   }
 
-  async function runAnalysis(prompt) {
+  async function runAnalysis(prompt, onChars) {
     const api = getLocalAI();
     let localError = null;
 
@@ -300,7 +311,11 @@ TEXT TO ANALYZE:
         try {
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
-          const output = await session.prompt(prompt, { signal: controller.signal, ...(api.promptOptions || {}) });
+          const promptOpts = { signal: controller.signal, ...(api.promptOptions || {}) };
+          const output =
+            typeof session.promptStreaming === 'function'
+              ? await promptWithStreaming(session, prompt, promptOpts, onChars)
+              : await session.prompt(prompt, promptOpts);
           clearTimeout(timer);
           return { status: 'complete', result: parseAIResponse(output) };
         } finally {
@@ -353,6 +368,22 @@ TEXT TO ANALYZE:
   }
 
   /**
+   * Streams the model response, reporting the growing output length — this
+   * drives the popup progress bar with real generation data. Handles both
+   * chunk styles: the origin-trial API yielded the full accumulated prefix
+   * each time; the newer LanguageModel API yields deltas to append.
+   */
+  async function promptWithStreaming(session, prompt, opts, onChars) {
+    let text = '';
+    for await (const chunk of session.promptStreaming(prompt, opts)) {
+      const piece = String(chunk);
+      text = piece.startsWith(text) ? piece : text + piece;
+      onChars?.(text.length);
+    }
+    return text;
+  }
+
+  /**
    * Strips accidental markdown fences and parses the model output.
    * Any failure degrades safely to an empty report (and logs the raw text).
    */
@@ -392,9 +423,10 @@ TEXT TO ANALYZE:
    * 4. Persistence + badge notification
    * ------------------------------------------------------------------ */
 
-  async function saveAndNotify(payload) {
+  async function saveAndNotify(payload, scanId = null) {
     const entry = {
       ...payload,
+      scanId,
       hostname: HOSTNAME,
       scannedUrl: location.href,
       updatedAt: Date.now(),
@@ -411,11 +443,60 @@ TEXT TO ANALYZE:
     } catch { /* service worker may be restarting — badge will re-sync on tab events */ }
   }
 
+  function newScanId() {
+    return Date.now().toString(36) + Math.random().toString(36).slice(2);
+  }
+
+  /** True when a DIFFERENT in-flight scan (manual, or another tab) owns the entry. */
+  async function anotherScanOwnsEntry(scanId) {
+    try {
+      const existing = (await chrome.storage.local.get(HOSTNAME))[HOSTNAME];
+      return (
+        existing?.status === 'loading' &&
+        existing.scanId !== scanId &&
+        Date.now() - existing.updatedAt < 2 * 60 * 1000
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Best-effort progress updates for the popup bar. Throttled, merged into
+   * the hostname's storage entry, and never resurrects a finished scan.
+   */
+  async function reportProgress(phase, percent, force = false, scanId = null) {
+    const now = Date.now();
+    if (!force && now - lastProgressWrite < 150) return;
+    lastProgressWrite = now;
+    try {
+      const existing = (await chrome.storage.local.get(HOSTNAME))[HOSTNAME];
+      if (existing?.status !== 'loading') return;
+      if (existing.scanId && existing.scanId !== scanId) return; // another scan owns it
+      await chrome.storage.local.set({
+        [HOSTNAME]: {
+          ...existing,
+          progress: { phase, percent: Math.max(0, Math.min(99, Math.round(percent))) },
+        },
+      });
+    } catch { /* progress is best-effort */ }
+  }
+
   /* ------------------------------------------------------------------ *
    * 5. Scan orchestration
    * ------------------------------------------------------------------ */
 
   async function runAutoScan() {
+    const scanId = newScanId();
+    // Writes go through autoSave: if another scan (e.g. a manual scan from
+    // the popup, or the same site in another tab) owns this host's entry,
+    // the auto-scan yields instead of clobbering it.
+    const autoSave = async (payload) => {
+      if (await anotherScanOwnsEntry(scanId)) return false;
+      await saveAndNotify(payload, scanId);
+      return true;
+    };
+
     try {
       // Skip fresh analysis if we have a recent result for this host —
       // including failures. Without negative caching, every pageview retries
@@ -437,40 +518,62 @@ TEXT TO ANALYZE:
         return;
       }
 
+      if (await anotherScanOwnsEntry(scanId)) return; // a scan is already in flight for this host
+
       const links = findPolicyLinks();
       if (links.length === 0) {
-        await saveAndNotify({ status: 'no_links' });
+        await autoSave({ status: 'no_links' });
         return;
       }
 
-      await saveAndNotify({ status: 'loading', links });
+      if (!(await autoSave({
+        status: 'loading',
+        links,
+        progress: { phase: `Fetching ${links.length} policy page(s)…`, percent: 10 },
+      }))) return;
 
-      const settled = await Promise.allSettled(links.map(fetchPolicyText));
+      let fetched = 0;
+      const settled = await Promise.allSettled(
+        links.map((u) =>
+          fetchPolicyText(u).then((t) => {
+            fetched++;
+            reportProgress(
+              `Fetching policy pages… (${fetched}/${links.length})`,
+              10 + (fetched / links.length) * 20
+            );
+            return t;
+          })
+        )
+      );
       const combined = settled
         .filter((r) => r.status === 'fulfilled' && r.value)
         .map((r) => r.value)
         .join('\n\n---\n\n');
 
       if (!combined.trim()) {
-        await saveAndNotify({ status: 'error', error: 'Could not retrieve policy text from the detected links.' });
+        await autoSave({ status: 'error', error: 'Could not retrieve policy text from the detected links.' });
         return;
       }
 
-      const analysis = await analyzeText(combined);
-      await saveAndNotify(
+      const analysis = await analyzeText(combined, scanId);
+      await autoSave(
         analysis.status === 'complete'
           ? { status: 'complete', result: analysis.result, links }
           : analysis
       );
     } catch (err) {
       console.error('[TOS Bodyguard] Auto-scan failed:', describeError(err), err);
-      await saveAndNotify({ status: 'error', error: describeError(err) }).catch(() => {});
+      await autoSave({ status: 'error', error: describeError(err) }).catch(() => {});
     }
   }
 
   /** Manual scan (popup button): analyzes the text of the page itself. */
   async function runManualScan() {
-    await saveAndNotify({ status: 'loading' });
+    const scanId = newScanId();
+    await saveAndNotify({
+      status: 'loading',
+      progress: { phase: 'Reading the current page…', percent: 15 },
+    }, scanId);
 
     const pageText = (document.body?.innerText || document.documentElement?.textContent || '')
       .replace(/\s+/g, ' ')
@@ -478,16 +581,16 @@ TEXT TO ANALYZE:
 
     if (!pageText) {
       const payload = { status: 'error', error: 'No readable text found on this page.' };
-      await saveAndNotify(payload);
+      await saveAndNotify(payload, scanId);
       return payload;
     }
 
-    const analysis = await analyzeText(pageText);
+    const analysis = await analyzeText(pageText, scanId);
     const payload =
       analysis.status === 'complete'
         ? { status: 'complete', result: analysis.result, links: [location.href] }
         : analysis;
-    await saveAndNotify(payload);
+    await saveAndNotify(payload, scanId);
     return payload;
   }
 

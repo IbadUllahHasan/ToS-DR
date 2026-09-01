@@ -14,6 +14,8 @@ built-in AI (Gemini Nano via the Prompt API) to surface user-hostile clauses.
 - **Badge risk indicator** — red badge with the risk count, green when clean.
 - **Cookie-banner auto-reject** — clicks "Reject All" using per-domain rules (`rules.json`).
 - **Manual scan** — analyze any page directly from the popup.
+- **Live queue + progress bar** — see which site the on-device AI is reading,
+  which sites are waiting, and real generation progress (via ).
 - **Privacy by design** — no network calls with page content; everything runs locally.
 
 ## Install

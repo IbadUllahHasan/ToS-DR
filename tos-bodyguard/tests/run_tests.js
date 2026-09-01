@@ -27,6 +27,7 @@ const waitFor = async (fn, timeout = 3000) => {
 
 function loadContentScript(overrides = {}) {
   const storage = { ...(overrides.initialStorage || {}) };
+  const setCalls = [];
   const sentMessages = [];
   const messageListeners = [];
   const consoleErrors = [];
@@ -57,7 +58,7 @@ function loadContentScript(overrides = {}) {
     storage: {
       local: {
         get: async (key) => (key in storage ? { [key]: storage[key] } : {}),
-        set: async (obj) => Object.assign(storage, obj),
+        set: async (obj) => { setCalls.push(obj); return Object.assign(storage, obj); },
       },
     },
   };
@@ -103,7 +104,7 @@ function loadContentScript(overrides = {}) {
   const sendManualScan = () =>
     new Promise((resolve) => messageListeners[0]({ type: 'MANUAL_SCAN' }, {}, resolve));
 
-  return { storage, sentMessages, consoleErrors, clicked, sendManualScan, overrides };
+  return { storage, setCalls, sentMessages, consoleErrors, clicked, sendManualScan, overrides };
 }
 
 const aiReturning = (text, captured) => ({
@@ -346,6 +347,7 @@ async function testAnalysisHoldsAndReleasesMutex() {
   await sendManualScan();
   const types = sentMessages.map((m) => m.type);
   assert.ok(types.includes('AI_ACQUIRE'), 'must acquire the AI lock');
+  assert.strictEqual(sentMessages.find((m) => m.type === 'AI_ACQUIRE').hostname, 'example.com');
   assert.ok(types.includes('AI_RELEASE'), 'must release the AI lock');
   assert.ok(types.indexOf('AI_ACQUIRE') < types.indexOf('AI_RELEASE'));
   console.log('PASS analysis acquires then releases the browser-wide AI mutex');
@@ -407,12 +409,64 @@ async function testInvalidStateErrorRetriesOnce() {
   console.log('PASS InvalidStateError retries once with a fresh session');
 }
 
+
+async function testStreamingDeltaChunksDriveProgress() {
+  // New LanguageModel style: each chunk is a delta to append.
+  const ai = {
+    languageModel: {
+      capabilities: async () => ({ available: 'readily' }),
+      create: async () => ({
+        prompt: async () => { throw new Error('streaming path should be used'); },
+        promptStreaming: async function* () {
+          yield '{"total_risks_found":0,';
+          yield '"risks":[]}';
+        },
+        destroy: () => {},
+      }),
+    },
+  };
+  const { sendManualScan, setCalls } = loadContentScript({ ai, bodyText: 'policy text' });
+  const resp = await sendManualScan();
+  assert.strictEqual(resp.status, 'complete');
+  assert.strictEqual(resp.result.total_risks_found, 0);
+  const progresses = setCalls
+    .flatMap((c) => Object.values(c))
+    .map((v) => v && v.progress)
+    .filter(Boolean);
+  assert.ok(progresses.some((p) => p.phase.includes('Analyzing')), 'should report analyzing progress');
+  assert.ok(Math.max(...progresses.map((p) => p.percent)) >= 45, 'progress should reach >= 45%');
+  console.log('PASS streaming (delta chunks) parses correctly and drives the progress bar');
+}
+
+async function testStreamingLegacyPrefixChunks() {
+  // Origin-trial style: each chunk is the FULL accumulated prefix.
+  const full = '{"total_risks_found":1,"risks":[{"category":"LEGAL_TRAPS","severity":"HIGH","summary":"s","exact_quote":"q"}]}';
+  const ai = {
+    languageModel: {
+      capabilities: async () => ({ available: 'readily' }),
+      create: async () => ({
+        promptStreaming: async function* () {
+          yield full.slice(0, 25);
+          yield full;
+        },
+        destroy: () => {},
+      }),
+    },
+  };
+  const { sendManualScan } = loadContentScript({ ai, bodyText: 'policy text' });
+  const resp = await sendManualScan();
+  assert.strictEqual(resp.status, 'complete');
+  assert.strictEqual(resp.result.total_risks_found, 1);
+  console.log('PASS streaming (legacy full-prefix chunks) parsed without duplication');
+}
+
 /* ------------------------------------------------------------------ *
  * background.js harness + tests
  * ------------------------------------------------------------------ */
 
 function loadBackground(overrides = {}) {
   const badge = { text: [], color: [] };
+  const sessionWrites = [];
   const listeners = { message: [], removed: [] };
 
   const chromeMock = {
@@ -427,7 +481,10 @@ function loadBackground(overrides = {}) {
       onRemoved: { addListener: (fn) => listeners.removed.push(fn) },
       get: async (id) => ({ id, url: 'https://example.com/' }),
     },
-    storage: { local: { get: async () => ({}) } },
+    storage: {
+      local: { get: async () => ({}) },
+      session: { set: async (obj) => sessionWrites.push(obj), get: async () => ({}) },
+    },
     scripting: { executeScript: overrides.executeScript || (async () => [{ result: { ok: true, text: '{}' } }]) },
   };
 
@@ -435,7 +492,7 @@ function loadBackground(overrides = {}) {
   vm.createContext(sandbox);
   if (overrides.env) overrides.env.sandbox = sandbox; // lets tests inject MAIN-world globals
   vm.runInContext(read('background.js'), sandbox, { filename: 'background.js' });
-  return { badge, listeners };
+  return { badge, listeners, sessionWrites };
 }
 
 async function testBadgeColors() {
@@ -547,6 +604,29 @@ async function testAiMutexReleasedOnTabClose() {
   console.log('PASS AI mutex auto-releases when the holder tab closes');
 }
 
+
+async function testQueueStatePublished() {
+  const { listeners, sessionWrites } = loadBackground();
+  const handler = listeners.message[0];
+
+  handler({ type: 'AI_ACQUIRE', hostname: 'a.com' }, { tab: { id: 1 } }, () => {});
+  let last = sessionWrites[sessionWrites.length - 1].aiQueue;
+  assert.strictEqual(last.current.hostname, 'a.com');
+  assert.strictEqual(last.waiting.length, 0);
+
+  handler({ type: 'AI_ACQUIRE', hostname: 'b.com' }, { tab: { id: 2 } }, () => {});
+  last = sessionWrites[sessionWrites.length - 1].aiQueue;
+  assert.strictEqual(last.current.hostname, 'a.com');
+  assert.strictEqual(last.waiting.length, 1);
+  assert.strictEqual(last.waiting[0].hostname, 'b.com');
+
+  handler({ type: 'AI_RELEASE' }, { tab: { id: 1 } }, () => {});
+  last = sessionWrites[sessionWrites.length - 1].aiQueue;
+  assert.strictEqual(last.current.hostname, 'b.com');
+  assert.strictEqual(last.waiting.length, 0);
+  console.log('PASS queue state published to storage.session (current + waiting)');
+}
+
 /* ------------------------------------------------------------------ *
  * Runner
  * ------------------------------------------------------------------ */
@@ -568,12 +648,15 @@ async function testAiMutexReleasedOnTabClose() {
     testAnalysisHoldsAndReleasesMutex,
     testNegativeResultBacksOff,
     testInvalidStateErrorRetriesOnce,
+    testStreamingDeltaChunksDriveProgress,
+    testStreamingLegacyPrefixChunks,
     testBadgeColors,
     testFetchRelayStripsHtml,
     testMainWorldBridge,
     testMainWorldBridgeNoAi,
     testAiMutexSerialization,
     testAiMutexReleasedOnTabClose,
+    testQueueStatePublished,
   ];
   let failed = 0;
   for (const t of tests) {
