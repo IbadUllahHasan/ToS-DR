@@ -458,6 +458,7 @@ TEXT TO ANALYZE:
         category: String(r.category ?? 'UNKNOWN').slice(0, 60),
         severity: r.severity === 'HIGH' ? 'HIGH' : 'MEDIUM',
         summary: String(r.summary ?? '').slice(0, 500),
+        explanation: String(r.explanation ?? '').slice(0, 800), // cloud-only field
         exact_quote: String(r.exact_quote ?? '').slice(0, 1000),
       }));
       // Keep the headline number consistent with the sanitized list.

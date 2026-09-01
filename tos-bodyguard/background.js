@@ -293,7 +293,8 @@ Scan for these 5 categories: DATA_RESALE, INFINITE_RETENTION, AGGRESSIVE_TRACKIN
 CONSTRAINTS:
 - Be thorough: review the ENTIRE text section by section. Real policies usually contain several issues — do not stop at the first one.
 - Flag a risk whenever the text explicitly permits the practice; do not give the policy the benefit of the doubt.
-- Write each summary in simple everyday language a non-lawyer understands (max 2 short sentences) and say WHY it hurts the user.
+- NEVER write generic filler like "your data may be shared" or "they can track you". Name WHO gets to do WHAT, specifically.
+- Write for a smart 15-year-old: zero legalese, zero jargon.
 - Output strictly in valid JSON format.
 - Do NOT wrap in markdown blocks (no \`\`\`json).
 
@@ -304,7 +305,8 @@ OUTPUT SCHEMA:
     {
       "category": "String (From the 5 categories)",
       "severity": "String (HIGH or MEDIUM)",
-      "summary": "String (plain-English explanation)",
+      "summary": "String (ONE short plain-English sentence naming the exact practice)",
+      "explanation": "String (2-3 sentences in simple everyday words: what this clause lets the company do in practice, and a concrete example of how it could affect an ordinary user)",
       "exact_quote": "String (Verbatim quote from text)"
     }
   ]
@@ -398,6 +400,7 @@ function mergeChunkResults(texts) {
         category: String(r.category ?? 'UNKNOWN').slice(0, 60),
         severity: r.severity === 'HIGH' ? 'HIGH' : 'MEDIUM',
         summary: String(r.summary ?? '').slice(0, 500),
+        explanation: String(r.explanation ?? '').slice(0, 800),
         exact_quote: String(r.exact_quote ?? '').slice(0, 1000),
       });
       if (risks.length >= 25) break;

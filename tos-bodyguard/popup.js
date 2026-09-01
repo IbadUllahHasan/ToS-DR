@@ -23,6 +23,22 @@ const PROVIDER_DEFAULT_MODELS = {
   minimax: 'MiniMax-Text-01',
 };
 
+const PROVIDER_NAMES = {
+  gemini: 'Google Gemini',
+  groq: 'Groq',
+  openai: 'OpenAI',
+  minimax: 'MiniMax',
+};
+
+/** Human label for the currently-configured analysis engine. */
+function engineLabel() {
+  const s = state.settings;
+  if (s?.provider && s.provider !== 'nano' && s.keys?.[s.provider]) {
+    return `${PROVIDER_NAMES[s.provider] || s.provider} cloud AI`;
+  }
+  return 'on-device AI';
+}
+
 const state = { tab: null, hostname: null, settings: null };
 
 document.addEventListener('DOMContentLoaded', init);
@@ -177,7 +193,7 @@ function renderLoading(root, entry) {
   root.replaceChildren();
   const wrap = el('div', 'flex flex-col items-center gap-3 py-8');
   const spinner = el('div', 'h-8 w-8 animate-spin rounded-full border-4 border-indigo-200 border-t-indigo-600');
-  const label = el('p', 'text-sm text-slate-500 text-center', 'Analyzing policies with on-device AI…');
+  const label = el('p', 'text-sm text-slate-500 text-center', `Analyzing policies with ${engineLabel()}…`);
   wrap.append(spinner, label);
   if (entry?.progress) {
     wrap.append(buildProgressBar(entry.progress));
@@ -305,12 +321,19 @@ function renderRiskCard(risk) {
 
   const summary = el('p', 'mt-1 text-sm text-slate-700', risk.summary);
 
+  if (risk.explanation) {
+    const why = el('p', 'mt-2 rounded bg-slate-50 p-2 text-xs text-slate-600', `💡 ${risk.explanation}`);
+    card.append(topRow, summary, why);
+  } else {
+    card.append(topRow, summary);
+  }
+
   const details = el('details', 'mt-2');
   const toggle = el('summary', 'cursor-pointer select-none text-xs font-medium text-indigo-600', 'View exact quote');
   const quote = el('blockquote', 'mt-1 break-words border-l-2 border-slate-300 pl-2 text-xs italic text-slate-500', `“${risk.exact_quote}”`);
   details.append(toggle, quote);
 
-  card.append(topRow, summary, details);
+  card.append(details);
   return card;
 }
 

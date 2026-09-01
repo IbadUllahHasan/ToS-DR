@@ -514,7 +514,7 @@ async function testCloudProviderPathSkipsMutex() {
     onSendMessage: (msg) => {
       sentTypes.push(msg.type);
       if (msg.type === 'RUN_AI_CLOUD') {
-        return { ok: true, engine: 'groq · llama-x', text: '{"total_risks_found":3,"risks":[{"category":"DATA_RESALE","severity":"HIGH","summary":"a","exact_quote":"q1"},{"category":"LEGAL_TRAPS","severity":"MEDIUM","summary":"b","exact_quote":"q2"},{"category":"SHADOW_PROFILING","severity":"MEDIUM","summary":"c","exact_quote":"q3"}]}' };
+        return { ok: true, engine: 'groq · llama-x', text: '{"total_risks_found":3,"risks":[{"category":"DATA_RESALE","severity":"HIGH","summary":"a","exact_quote":"q1"},{"category":"LEGAL_TRAPS","severity":"MEDIUM","summary":"b","exact_quote":"q2"},{"category":"SHADOW_PROFILING","severity":"MEDIUM","summary":"c","explanation":"They can build a profile of you from things you never told them — e.g. guessing your interests from pages you only glanced at.","exact_quote":"q3"}]}' };
       }
       if (msg.type === 'AI_ACQUIRE') return { granted: true };
       return { ok: true };
@@ -526,6 +526,7 @@ async function testCloudProviderPathSkipsMutex() {
   assert.ok(sentTypes.includes('RUN_AI_CLOUD'), 'cloud path used');
   assert.ok(!sentTypes.includes('AI_ACQUIRE'), 'cloud path must not take the local mutex');
   assert.strictEqual(resp.engine, 'groq · llama-x', 'engine recorded from cloud response');
+  assert.ok(resp.result.risks[2].explanation.includes('profile'), 'explanation field survives parsing');
   console.log('PASS cloud provider path used, local mutex skipped, engine recorded');
 }
 
@@ -736,6 +737,7 @@ async function testCloudChunkingMergeDedupe() {
     const risks =
       n === 1 ? [{ category: 'DATA_RESALE', severity: 'HIGH', summary: 's1', exact_quote: 'quote-one' }]
       : n === 2 ? [
+          { category: 'X', severity: 'MEDIUM', summary: 'sx', explanation: 'why it matters', exact_quote: 'quote-x' },
           { category: 'LEGAL_TRAPS', severity: 'MEDIUM', summary: 's2', exact_quote: 'quote-two' },
           { category: 'DATA_RESALE', severity: 'HIGH', summary: 's1-dup', exact_quote: 'quote-one' }, // dup
         ]
@@ -753,7 +755,8 @@ async function testCloudChunkingMergeDedupe() {
   assert.ok(resp.ok, 'cloud analysis ok');
   assert.strictEqual(bodies.length, 3, '25,000 chars -> 3 overlapping chunks');
   const merged = JSON.parse(resp.text);
-  assert.strictEqual(merged.total_risks_found, 2, 'duplicate quotes deduped across chunks');
+  assert.strictEqual(merged.total_risks_found, 3, 'duplicates deduped, unique kept');
+  assert.ok(merged.risks.some((r) => r.explanation === 'why it matters'), 'explanation survives merge');
   console.log('PASS cloud analysis chunks long text, merges + dedupes risks');
 }
 
