@@ -1,4 +1,4 @@
-# 🛡️ TOS Bodyguard
+# 🛡️ TOS;DR (Terms Of Service;Didn't read) Bodyguard
 
 **Nobody reads the Terms of Service. TOS Bodyguard does — and tells you exactly what to worry about.**
 
