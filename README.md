@@ -7,6 +7,7 @@ A Chrome extension that automatically finds a site's Privacy Policy & Terms, rea
 ![Manifest V3](https://img.shields.io/badge/Manifest-V3-blue) ![Chrome 127+](https://img.shields.io/badge/Chrome-127%2B-brightgreen) ![License: MIT](https://img.shields.io/badge/License-MIT-yellow) ![Price](https://img.shields.io/badge/Price-Free-orange)
 
 ---
+![demo](docs/screenshot.png) 
 
 ## 😤 The problem
 
