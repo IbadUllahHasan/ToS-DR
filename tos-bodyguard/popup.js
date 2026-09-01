@@ -79,7 +79,7 @@ function renderLoading(root) {
   const wrap = el('div', 'flex flex-col items-center gap-3 py-8');
   const spinner = el('div', 'h-8 w-8 animate-spin rounded-full border-4 border-indigo-200 border-t-indigo-600');
   const label = el('p', 'text-sm text-slate-500 text-center', 'Analyzing policies with on-device AI…');
-  const sub = el('p', 'text-xs text-slate-400 text-center', 'First run may take a moment while Gemini Nano warms up.');
+  const sub = el('p', 'text-xs text-slate-400 text-center', 'On-device inference can take 1–3 min on CPU-only machines. Results cache for 30 min.');
   wrap.append(spinner, label, sub);
   root.append(wrap);
 }

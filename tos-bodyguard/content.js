@@ -27,7 +27,7 @@
   const MAX_TEXT_CHARS = 8000;        // stay well inside Gemini Nano's context window
   const MAX_LINKS_TO_FETCH = 3;       // e.g. Privacy + Terms + Cookies
   const CACHE_TTL_MS = 30 * 60 * 1000; // don't re-analyze the same host for 30 min
-  const AI_TIMEOUT_MS = 90 * 1000;
+  const AI_TIMEOUT_MS = 180 * 1000; // CPU-fallback inference on 8k chars can take minutes
 
   /**
    * The exact analysis prompt. The scraped text is injected in place of
@@ -57,6 +57,32 @@ OUTPUT SCHEMA:
 
 TEXT TO ANALYZE:
 [INSERT_SCRAPED_TEXT]`;
+
+  /**
+   * JSON Schema passed as responseConstraint when the newer LanguageModel
+   * API is used: guaranteed-valid JSON, and generation stops as soon as the
+   * schema is satisfied instead of rambling to the token limit.
+   */
+  const RISK_SCHEMA = {
+    type: 'object',
+    properties: {
+      total_risks_found: { type: 'number' },
+      risks: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            category: { type: 'string' },
+            severity: { type: 'string' },
+            summary: { type: 'string' },
+            exact_quote: { type: 'string' },
+          },
+          required: ['category', 'severity', 'summary', 'exact_quote'],
+        },
+      },
+    },
+    required: ['total_risks_found', 'risks'],
+  };
 
   /* ------------------------------------------------------------------ *
    * Utilities
@@ -194,6 +220,7 @@ TEXT TO ANALYZE:
           return 'readily';
         },
         create: (opts) => legacy.create(opts),
+        promptOptions: {}, // legacy API predates responseConstraint
       };
     }
 
@@ -205,6 +232,7 @@ TEXT TO ANALYZE:
             expectedOutputs: [{ type: 'text', languages: ['en'] }],
             ...opts,
           }),
+        promptOptions: { responseConstraint: RISK_SCHEMA },
       };
     }
 
@@ -216,6 +244,7 @@ TEXT TO ANALYZE:
           return caps.available;
         },
         create: (opts) => ext.create(opts),
+        promptOptions: {},
       };
     }
 
@@ -249,7 +278,7 @@ TEXT TO ANALYZE:
         try {
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
-          const output = await session.prompt(prompt, { signal: controller.signal });
+          const output = await session.prompt(prompt, { signal: controller.signal, ...(api.promptOptions || {}) });
           clearTimeout(timer);
           return { status: 'complete', result: parseAIResponse(output) };
         } finally {
@@ -262,6 +291,14 @@ TEXT TO ANALYZE:
         // usefully, then give the MAIN-world bridge a second chance.
         localError = err;
         console.warn('[TOS Bodyguard] Local AI session failed:', describeError(err));
+        if (err && err.name === 'AbortError') {
+          // Our own timeout fired. Re-running the same inference via the
+          // bridge would just double the wait — fail fast instead.
+          return {
+            status: 'error',
+            error: `AI timed out after ${Math.round(AI_TIMEOUT_MS / 1000)}s — the on-device model is CPU-bound or busy. Try again.`,
+          };
+        }
       }
     }
 
@@ -269,10 +306,13 @@ TEXT TO ANALYZE:
     // MAIN world, which content scripts (isolated world) cannot see. The
     // service worker can execute our prompt there via chrome.scripting.
     const bridged = await chrome.runtime
-      .sendMessage({ type: 'RUN_AI_MAINWORLD', prompt })
+      .sendMessage({ type: 'RUN_AI_MAINWORLD', prompt, schema: RISK_SCHEMA })
       .catch(() => null);
 
     if (bridged?.ok) return { status: 'complete', result: parseAIResponse(bridged.text) };
+    if (bridged?.error === 'timeout') {
+      return { status: 'error', error: 'AI timed out — the on-device model is CPU-bound or busy. Try again.' };
+    }
     if (bridged?.error === 'ai-unavailable') {
       return localError
         ? { status: 'ai_unavailable', error: describeError(localError) }

@@ -81,6 +81,7 @@ function loadContentScript(overrides = {}) {
     location: { hostname: overrides.hostname || 'example.com', href: 'https://example.com/' },
     ai: overrides.ai,
   };
+  if (overrides.languageModelGlobal) windowMock.LanguageModel = overrides.languageModelGlobal;
   windowMock.top = windowMock;
 
   const sandbox = {
@@ -290,6 +291,50 @@ async function testCreateOptionsRejectedRetriesDefaults() {
   console.log('PASS create(options) rejection retries with defaults');
 }
 
+
+async function testAbortSkipsBridgeAndFailsFast() {
+  // Regression: a local timeout must NOT fall through to the bridge
+  // (that used to start the whole inference over -> perceived "forever").
+  const ai = {
+    languageModel: {
+      capabilities: async () => ({ available: 'readily' }),
+      create: async () => ({
+        prompt: async () => { throw new DOMException('The operation was aborted.', 'AbortError'); },
+        destroy: () => {},
+      }),
+    },
+  };
+  const sentTypes = [];
+  const { sendManualScan } = loadContentScript({
+    ai,
+    bodyText: 'policy text',
+    onSendMessage: (msg) => { sentTypes.push(msg.type); return { ok: true }; },
+  });
+  const resp = await sendManualScan();
+  assert.strictEqual(resp.status, 'error');
+  assert.ok(resp.error.includes('timed out'), 'should report a timeout');
+  assert.ok(!sentTypes.includes('RUN_AI_MAINWORLD'), 'bridge must not re-run after abort');
+  console.log('PASS abort/timeout fails fast without bridge re-run');
+}
+
+async function testLanguageModelNamespaceUsesResponseConstraint() {
+  let seenOpts = null;
+  const languageModelGlobal = {
+    availability: async () => 'available',
+    create: async () => ({
+      prompt: async (_p, opts) => { seenOpts = opts; return '{"total_risks_found":0,"risks":[]}' ; },
+      destroy: () => {},
+    }),
+  };
+  const { sendManualScan } = loadContentScript({ languageModelGlobal, bodyText: 'policy text' });
+  const resp = await sendManualScan();
+  assert.strictEqual(resp.status, 'complete');
+  assert.ok(seenOpts && seenOpts.responseConstraint, 'responseConstraint should be passed');
+  assert.strictEqual(seenOpts.responseConstraint.type, 'object');
+  assert.ok(seenOpts.responseConstraint.required.includes('total_risks_found'));
+  console.log('PASS LanguageModel path sends responseConstraint JSON schema');
+}
+
 /* ------------------------------------------------------------------ *
  * background.js harness + tests
  * ------------------------------------------------------------------ */
@@ -313,7 +358,7 @@ function loadBackground(overrides = {}) {
     scripting: { executeScript: overrides.executeScript || (async () => [{ result: { ok: true, text: '{}' } }]) },
   };
 
-  const sandbox = { chrome: chromeMock, fetch: overrides.fetch, console, URL };
+  const sandbox = { chrome: chromeMock, fetch: overrides.fetch, console, URL, setTimeout, clearTimeout };
   vm.createContext(sandbox);
   if (overrides.env) overrides.env.sandbox = sandbox; // lets tests inject MAIN-world globals
   vm.runInContext(read('background.js'), sandbox, { filename: 'background.js' });
@@ -356,6 +401,7 @@ async function testMainWorldBridge() {
   const env = {};
   const executeScript = async (opts) => {
     assert.strictEqual(opts.world, 'MAIN');
+    assert.deepEqual(opts.args[1], { type: 'object', marker: true }); // schema forwarded
     // The injected func resolves `window` against the sandbox global,
     // exactly like a page MAIN world would provide it.
     env.sandbox.window = {
@@ -374,7 +420,7 @@ async function testMainWorldBridge() {
   };
   const { listeners } = loadBackground({ executeScript: executeScript, env: env });
   const resp = await new Promise((resolve) =>
-    listeners.message[0]({ type: 'RUN_AI_MAINWORLD', prompt: 'You are a strict...' }, { tab: { id: 2 } }, resolve)
+    listeners.message[0]({ type: 'RUN_AI_MAINWORLD', prompt: 'You are a strict...', schema: { type: 'object', marker: true } }, { tab: { id: 2 } }, resolve)
   );
   assert.deepEqual(resp, { ok: true, text: 'AI:You' });
   console.log('PASS MAIN-world bridge executes prompt and returns model text');
@@ -410,6 +456,8 @@ async function testMainWorldBridgeNoAi() {
     testLocalAiDomExceptionFallsBackToBridge,
     testDomExceptionIsDescribedNotObjectified,
     testCreateOptionsRejectedRetriesDefaults,
+    testAbortSkipsBridgeAndFailsFast,
+    testLanguageModelNamespaceUsesResponseConstraint,
     testBadgeColors,
     testFetchRelayStripsHtml,
     testMainWorldBridge,

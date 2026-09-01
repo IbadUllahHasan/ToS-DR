@@ -35,7 +35,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true; // async
 
     case 'RUN_AI_MAINWORLD':
-      runPromptInMainWorld(sender.tab?.id, msg.prompt).then(sendResponse);
+      runPromptInMainWorld(sender.tab?.id, msg.prompt, msg.schema).then(sendResponse);
       return true; // async
 
     default:
@@ -150,18 +150,26 @@ function stripHtml(html) {
  * MAIN-world Prompt API bridge
  * ------------------------------------------------------------------ */
 
-async function runPromptInMainWorld(tabId, prompt) {
+async function runPromptInMainWorld(tabId, prompt, schema) {
   if (!tabId || typeof prompt !== 'string') return { ok: false, error: 'bad-request' };
+
+  // Hard cap: on CPU-bound machines inference can be slow, but never infinite.
+  const timeout = new Promise((resolve) =>
+    setTimeout(() => resolve({ ok: false, error: 'timeout' }), 200000)
+  );
+
   try {
-    const [injection] = await chrome.scripting.executeScript({
+    const raced = await Promise.race([
+      chrome.scripting.executeScript({
       target: { tabId },
       world: 'MAIN',
-      args: [prompt],
+      args: [prompt, schema ?? null],
       // Self-contained: no references to service-worker scope are allowed.
-      func: async (promptText) => {
+      func: async (promptText, schema) => {
         try {
           let api = null;
           let availability = 'readily';
+          let isNewApi = false;
 
           if (window.ai?.languageModel?.create) {
             api = window.ai.languageModel;
@@ -170,6 +178,7 @@ async function runPromptInMainWorld(tabId, prompt) {
             }
           } else if (typeof LanguageModel !== 'undefined') {
             api = LanguageModel;
+            isNewApi = true;
             availability = await LanguageModel.availability();
           }
 
@@ -185,7 +194,10 @@ async function runPromptInMainWorld(tabId, prompt) {
             session = await api.create(); // some builds reject sampling options
           }
           try {
-            const text = await session.prompt(promptText);
+            // Structured output on the new API: valid JSON + generation stops
+            // when the schema is satisfied (no repetition-loop runaway).
+            const promptOpts = isNewApi && schema ? { responseConstraint: schema } : {};
+            const text = await session.prompt(promptText, promptOpts);
             return { ok: true, text: String(text) };
           } finally {
             try { session.destroy?.(); } catch { /* noop */ }
@@ -194,8 +206,11 @@ async function runPromptInMainWorld(tabId, prompt) {
           return { ok: false, error: String(e?.message || e) };
         }
       },
-    });
-    return injection?.result ?? { ok: false, error: 'no-result' };
+      }),
+      timeout,
+    ]);
+    if (!Array.isArray(raced)) return raced; // timeout won the race
+    return raced[0]?.result ?? { ok: false, error: 'no-result' };
   } catch (err) {
     return { ok: false, error: String(err?.message || err) };
   }
